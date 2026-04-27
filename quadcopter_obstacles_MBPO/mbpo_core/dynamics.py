@@ -152,13 +152,11 @@ class BatchedGaussianEnsemble(Configurable, Module, BaseModel):
         trunk_layers = 2           # 共享主干网络层数
         head_hidden_layers = 1     # 输出头隐藏层数
         activation = 'relu'        # 激活函数
-        init_min_log_var = -5.0    # 初始最小对数方差。不要过小，否则碰撞/终止跳变会让 NLL 过早爆炸
-        init_max_log_var = 2.0     # 初始最大对数方差，允许模型对坏状态保持更大不确定性
+        init_min_log_var = -10.0   # 初始最小对数方差
+        init_max_log_var = 1.0     # 初始最大对数方差
         log_var_bound_weight = 0.01  # 方差边界约束权重
         batch_size = 256           # 训练批次大小
-        learning_rate = 3e-4       # 学习率。动力学 ensemble 比策略网络更怕 NLL 尖峰，保守一些更稳
-        terminal_sample_weight = 0.25  # 终止/违规样本参与训练，但降低权重，避免少量极端碰撞样本主导梯度
-        nll_sample_clip = 1000.0   # 单样本 NLL 软上限，超过后对数增长，避免硬 clamp 造成梯度死区
+        learning_rate = 1e-3       # 学习率
 
     # 初始化模型
     def __init__(self, config, state_dim, action_dim,
@@ -184,12 +182,9 @@ class BatchedGaussianEnsemble(Configurable, Module, BaseModel):
         input_dim = state_dim + action_dim  # 模型输入维度 = 状态+动作
         output_dim = state_dim + 1          # 模型输出维度 = 下一状态+奖励
 
-        # 用“上界 + 正间隔”的方式参数化方差边界，避免 min/max 训练时交叉。
-        # max_log_var = raw_max_log_var
-        # min_log_var = raw_max_log_var - softplus(raw_log_var_gap)
-        init_gap = max(float(self.init_max_log_var) - float(self.init_min_log_var), 1e-3)
-        self.raw_max_log_var = nn.Parameter(torch.full([output_dim], self.init_max_log_var, device=device))
-        self.raw_log_var_gap = nn.Parameter(torch.full([output_dim], init_gap, device=device))
+        # 可学习的对数方差上下界（约束方差范围，保证数值稳定）
+        self.min_log_var = nn.Parameter(torch.full([output_dim], self.init_min_log_var, device=device))
+        self.max_log_var = nn.Parameter(torch.full([output_dim], self.init_max_log_var, device=device))
         # 状态归一化器：提升模型训练稳定性
         self.state_normalizer = Normalizer(state_dim)
 
@@ -215,23 +210,8 @@ class BatchedGaussianEnsemble(Configurable, Module, BaseModel):
             *self.trunk.parameters(),
             *self.diff_head.parameters(),
             *self.log_var_head.parameters(),
-            self.raw_max_log_var, self.raw_log_var_gap
+            self.min_log_var, self.max_log_var
         ], lr=self.learning_rate)
-
-    @property
-    def max_log_var(self):
-        return self.raw_max_log_var
-
-    @property
-    def min_log_var(self):
-        return self.raw_max_log_var - F.softplus(self.raw_log_var_gap)
-
-    def _bound_log_vars(self, raw_log_vars):
-        max_log_var = self.max_log_var
-        min_log_var = self.min_log_var
-        bounded = max_log_var - F.softplus(max_log_var - raw_log_vars)
-        bounded = min_log_var + F.softplus(bounded - min_log_var)
-        return bounded
 
     # 属性：总批量大小 = 集成数 × 单模型批次
     @property
@@ -271,7 +251,8 @@ class BatchedGaussianEnsemble(Configurable, Module, BaseModel):
         # 预测对数方差
         log_vars = unbatched_forward(self.log_var_head, shared_hidden, index)
         # 约束对数方差在[min, max]范围内
-        log_vars = self._bound_log_vars(log_vars)
+        log_vars = self.max_log_var - F.softplus(self.max_log_var - log_vars)
+        log_vars = self.min_log_var + F.softplus(log_vars - self.min_log_var)
         return means, log_vars
 
     # 全集成模型前向传播：所有模型一起计算
@@ -297,7 +278,8 @@ class BatchedGaussianEnsemble(Configurable, Module, BaseModel):
         means = diffs + torch.cat([states, torch.zeros([self.ensemble_size, batch_size, 1], device=device)], dim=-1)
         # 计算并约束对数方差
         log_vars = self.log_var_head(shared_hidden)
-        log_vars = self._bound_log_vars(log_vars)
+        log_vars = self.max_log_var - F.softplus(self.max_log_var - log_vars)
+        log_vars = self.min_log_var + F.softplus(log_vars - self.min_log_var)
         return means, log_vars
 
     # 重构批次：将数据按集成模型数量分组
@@ -318,7 +300,7 @@ class BatchedGaussianEnsemble(Configurable, Module, BaseModel):
         return x.reshape(self.ensemble_size, batch_size, *remaining_dims)
 
     # 计算模型损失：高斯负对数似然损失 + 方差约束损失
-    def compute_loss(self, states, actions, targets, sample_weights=None):
+    def compute_loss(self, states, actions, targets):
         # 输入：
         #   states: [N, state_dim]
         #   actions: [N, action_dim]
@@ -345,67 +327,26 @@ class BatchedGaussianEnsemble(Configurable, Module, BaseModel):
         # 高斯负对数似然核心项
         squared_errors = torch.sum((targets - means)**2 * inv_vars, dim=-1)
         log_dets = torch.sum(log_vars, dim=-1)
-        sample_losses = squared_errors + log_dets
-        if self.nll_sample_clip is not None and self.nll_sample_clip > 0:
-            # 硬 clamp 会让超过阈值的样本梯度变成 0，loss 很容易顶在 1000 附近学不动。
-            # 这里改成软截断：阈值以内保持原始 NLL，阈值以上继续增长但梯度逐渐变小。
-            cap = float(self.nll_sample_clip)
-            over_cap = torch.relu(sample_losses - cap)
-            sample_losses = sample_losses - over_cap + cap * torch.log1p(over_cap / cap)
-        if sample_weights is not None:
-            sample_weights = sample_weights[:len(sample_losses.reshape(-1))].reshape(sample_losses.shape)
-            mle_loss = torch.sum(sample_losses * sample_weights) / sample_weights.sum().clamp_min(1e-6)
-        else:
-            mle_loss = torch.mean(sample_losses)
-        # 正则只约束“方差区间宽度”，不再奖励 min/max 相互穿越。
-        log_var_gap = F.softplus(self.raw_log_var_gap)
-        return mle_loss + self.log_var_bound_weight * log_var_gap.mean()
+        mle_loss = torch.mean(squared_errors + log_dets)
+        # 总损失 = 似然损失 + 方差边界约束
+        return mle_loss + self.log_var_bound_weight * (self.max_log_var.sum() - self.min_log_var.sum())
 
     # 模型训练：用经验数据拟合环境模型
-    def fit(self, buffer, steps=None, epochs=None, progress_bar=False, filter_terminal=False, grad_clip_norm=1000.0, **kwargs):
+    def fit(self, buffer, steps=None, epochs=None, progress_bar=False, **kwargs):
         # 输入：
         #   buffer: 经验池
         #   steps: 按步训练的步数
         #   epochs: 按轮训练的轮数
         #   progress_bar: 是否显示进度条
-        #   filter_terminal: 是否过滤终止/违规转移（碰撞等导致的不连续物理跳变）
-        #   grad_clip_norm: 梯度裁剪最大范数，防止残余异常样本引发梯度爆炸
         # 输出：
         #   loss 列表
         # 参数：
         #   steps 与 epochs 二选一
         # 作用：
         #   从 buffer 中取出监督数据，训练 dynamics ensemble。
-        all_data = buffer.get(device=None)
-        states, actions, next_states, rewards = all_data[:4]
-
-        sample_weights = None
-        # 可选过滤终止/违规转移：默认关闭。
-        if filter_terminal and len(all_data) > 4:
-            dones = all_data[4]
-            valid_mask = ~dones
-            if len(all_data) > 5:
-                violations = all_data[5]
-                valid_mask = valid_mask & ~violations
-            n_filtered = int((~valid_mask).sum().item())
-            if n_filtered > 0:
-                states = states[valid_mask]
-                actions = actions[valid_mask]
-                next_states = next_states[valid_mask]
-                rewards = rewards[valid_mask]
-        elif len(all_data) > 4:
-            # 保留坏状态样本，但给终止/违规样本更小的 loss 权重，
-            # 让模型既能学到“撞了/过高/过低后下一帧长什么样”，
-            # 又不至于被极少数不连续转移彻底拖炸。
-            dones = all_data[4].to(dtype=torch.bool)
-            terminal_mask = dones.clone()
-            if len(all_data) > 5:
-                violations = all_data[5].to(dtype=torch.bool)
-                terminal_mask = terminal_mask | violations
-            sample_weights = torch.ones(len(states), device=states.device, dtype=torch.float)
-            sample_weights[terminal_mask] = float(self.terminal_sample_weight)
-
-        n = len(states)
+        n = len(buffer)
+        # 从缓冲区获取训练数据
+        states, actions, next_states, rewards = buffer.get()[:4]
         # 拟合状态归一化器
         self.state_normalizer.fit(states)
         # 训练目标 = 下一状态 + 奖励（拼接为一个张量）
@@ -417,19 +358,13 @@ class BatchedGaussianEnsemble(Configurable, Module, BaseModel):
             losses = []
             for _ in (trange if progress_bar else range)(steps):
                 # 随机采样批次数据
-                indices = torch.randint(n, [self.total_batch_size], device=states.device)
-                batch_states = states[indices].to(device)
-                batch_actions = actions[indices].to(device)
-                batch_targets = targets[indices].to(device)
-                batch_weights = sample_weights[indices].to(device) if sample_weights is not None else None
+                indices = torch.randint(n, [self.total_batch_size], device=device)
                 # 计算损失
-                loss = self.compute_loss(batch_states, batch_actions, batch_targets, sample_weights=batch_weights)
+                loss = self.compute_loss(states[indices], actions[indices], targets[indices])
                 losses.append(loss.item())
                 # 反向传播更新参数
                 self.optimizer.zero_grad()
                 loss.backward()
-                if grad_clip_norm > 0:
-                    torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=grad_clip_norm)
                 self.optimizer.step()
             return losses
         elif epochs is not None:

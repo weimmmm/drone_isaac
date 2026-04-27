@@ -13,6 +13,7 @@ from .actor_critic_vit_recurrent_asymmetric import ActorCriticVitRecurrentAsymme
 from .actor_critic_cnn_recurrent import ActorCriticCnnRecurrent
 from .actor_critic_ray_recurrent import ActorCriticRayRecurrent
 from .actor_critic_recurrent import ActorCriticRecurrent
+from .actor_critic_sac import ActorCriticSAC
 from .rnd import *
 from .student_teacher import StudentTeacher
 from .student_teacher_recurrent import StudentTeacherRecurrent
@@ -27,6 +28,7 @@ __all__ = [
     "ActorCriticCnnRecurrent",
     "ActorCriticRayRecurrent",
     "ActorCriticRecurrent",
+    "ActorCriticSAC",
     "StudentTeacher",
     "StudentTeacherRecurrent",
 ]

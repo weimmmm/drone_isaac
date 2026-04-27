@@ -62,7 +62,7 @@ class QuadcopterObstaclesEnvCfg:
     class SceneCfg:
         num_envs: int = 8 # 默认并行运行 8 个无人机环境
 
-    episode_length_s: float = 60.0 # 单个回合 (episode) 的最大时长为 60 秒
+    episode_length_s: float = 30.0 # 单个回合 (episode) 的最大时长为 30 秒
     decimation: int = 1 # 动作降采样步数（RL每输出1次动作，物理引擎步进1次）
     physics_dt: float = 1.0 / 100.0 # 物理引擎步长，100Hz
     device: str = "cuda:0" # RL 张量计算默认设备
@@ -90,34 +90,30 @@ class QuadcopterObstaclesEnvCfg:
     obstacle_visual_size_margin: float = 0.0  # 彩色可视化方柱相对真实方柱单边额外放大的尺寸，默认严格对齐真实检测尺寸。
     
     # ==================== 起点 / 终点采样配置 ====================
-    spawn_edge_distance: float = 23.0 # 出生点距离中心的边缘距离
-    target_spawn_range: float = 23.0 # 目标点生成的坐标范围
-    spawn_min_height: float = 1.5 # 出生最低高度 1.5 米
+    spawn_edge_distance: float = 24.0 # 出生点距离中心的边缘距离，对齐 NavRL
+    target_spawn_range: float = 24.0 # 目标点生成的坐标范围，对齐 NavRL
+    spawn_min_height: float = 0.5 # 出生最低高度 0.5 米，对齐 NavRL
     spawn_max_height: float = 2.5 # 出生最高高度 2.5 米
-    target_min_height: float = 1.5 # 目标最低高度 1.5 米
+    target_min_height: float = 0.5 # 目标最低高度 0.5 米，对齐 NavRL
     target_max_height: float = 2.5 # 目标最高高度 2.5 米
     min_flight_height: float = 0.5 # 低空死亡阈值；低于该高度判定为 too_low
     max_flight_height: float = 3.5 # 高空死亡阈值；高于该高度判定为 too_high
     out_of_bounds_margin: float = 2.0 # 水平边界额外余量；允许从边缘出生/到达目标，但禁止继续飞远
-    target_reach_threshold: float = 0.5 # 判定为“到达目标”的距离阈值（0.5米）
+    target_reach_threshold: float = 0.8 # 判定为“到达目标”的距离阈值（0.8米）
 
     # ==================== 动作解释为速度指令的范围 ====================
-    cmd_body_vel_xy_max: float = 2.0 # XY 平面最大机体线速度指令
-    cmd_vel_z_max: float = 1.0 # Z 轴最大垂直速度指令
+    cmd_body_vel_xy_max: float = 2 # XY 平面最大机体线速度指令
+    cmd_vel_z_max: float = 0.5 # Z 轴最大垂直速度指令
     yaw_rate_scale: float = 3.141592653589793 # 偏航角速度观测缩放系数，默认按 pi rad/s 归一化
 
     # ==================== 奖励项权重 ====================
-    # 目标推进：按参考环境的奖励风格，鼓励跟踪、接近目标和沿目标方向推进。
-    vel_tracking_reward_scale: float = 0.5 # 速度追踪奖励权重
-    vel_tracking_exp_scale: float = 1.0 # 速度追踪误差的指数衰减系数
-    ang_vel_reward_scale: float = -0.01 # 角速度惩罚权重（防止无人机过度旋转晃动）
-    distance_to_target_reward_scale: float = 10.0 # 距离目标越近奖励越大
-    target_velocity_reward_scale: float = 4.0 # 朝向目标速度投影的奖励权重
-    progress_reward_scale: float = 15.0 # 相对上一帧进步距离的奖励权重
-    
-    # 避障：保持和静态障碍物的安全距离。
-    obstacle_proximity_reward_scale: float = -6.0 # 接近障碍物的连续惩罚权重
-    obstacle_proximity_max_cost: float = 10.0 # 接近障碍物软惩罚的最大单步代价，防止 reward 数值异常
+    # 对齐 NavRL：朝目标速度 + 静态障碍安全奖励 + 速度平滑惩罚 + 高度惩罚 + 常数项。
+    survival_reward: float = 1.0 # 每步固定生存奖励
+    safety_static_reward_scale: float = 1.0 # 静态障碍安全奖励权重
+    velocity_to_goal_reward_scale: float = 1.0 # 朝目标方向速度奖励权重
+    smoothness_penalty_scale: float = 0.1 # 速度突变惩罚权重
+    height_penalty_scale: float = 8.0 # 偏离起终点高度带的惩罚权重
+    height_penalty_margin: float = 0.2 # 起终点高度带的额外安全余量
 
     # ==================== Gym / IsaacLab 通用配置 ====================
     observation_space: int = 0 # 观测空间维度（将在 __post_init__ 中自动计算）
@@ -256,6 +252,8 @@ class QuadcopterObstaclesEnv(gym.Env):
         self._target_positions_w = torch.zeros((self.num_envs, 3), device=self.device) # 各自的世界系目标点坐标
         # 上一时刻到目标的距离，用于构造 progress reward (势能差奖励)。
         self._prev_dist_to_target = torch.zeros(self.num_envs, device=self.device) 
+        self._prev_drone_vel_w = torch.zeros((self.num_envs, 3), device=self.device) # 上一时刻世界系线速度，用于平滑惩罚
+        self._height_range = torch.zeros((self.num_envs, 2), device=self.device) # 当前 episode 的目标高度带 [min_z, max_z]
         
         self._obstacle_positions_w = torch.zeros((self.cfg.num_obstacles, 3), device=self.device) # 障碍物世界系位置
         default_obstacle_height = float(self.cfg.obstacle_height)
@@ -269,21 +267,20 @@ class QuadcopterObstaclesEnv(gym.Env):
         self.episode_length_buf = torch.zeros(self.num_envs, dtype=torch.long, device=self.device) # 记录每个环境当前步数
         self._rew_buf = torch.zeros(self.num_envs, device=self.device) # 每步奖励缓冲区
         self._done_buf = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device) # 每步结束/截断标志位
+        self._episode_success_buf = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device) # 记录当前 episode 是否曾经到达目标
         
         self._episode_sums = {
             # 这些值用于 TensorBoard 里按 episode 统计不同奖励项和诊断指标。
             # 所有这些缓存都在每步进行累加，当一个 episode 结束时，计算平均值输出到日志，然后清零。
             key: torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
             for key in [
-                "vel_tracking",
-                "ang_vel",
-                "distance_to_target",
-                "target_velocity",
-                "obstacle_proximity",
-                "progress",
+                "survival",
+                "safety_static",
+                "velocity_to_goal",
+                "smoothness",
+                "height",
             ]
         }
-        self._episode_sums["vel_tracking_error"] = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
         self._shared_obstacle_layout: list[dict] | None = None # 保存布局生成器生成的障碍物布局字典
 
     @property
@@ -495,10 +492,11 @@ class QuadcopterObstaclesEnv(gym.Env):
         return positions
 
     def _sample_navigation_position_pairs(self, num_samples: int) -> tuple[torch.Tensor, torch.Tensor]:
-        # 起点和目标都在边缘，但目标不能和起点同边，并且二者连线的中点必须进入地图内部。
+        # 对齐 NavRL 的 reset 逻辑：
+        # 起点和目标分别独立从四条边界区域采样，不强制不同边，也不强制连线穿过地图中心。
+        # 这会覆盖同边、邻边、对边等更多导航分布，避免训练只看到“边缘到边缘穿越”的单一课程。
         start_sides = torch.randint(0, 4, (num_samples,), device=self.device)
-        side_offsets = torch.randint(1, 4, (num_samples,), device=self.device)
-        target_sides = (start_sides + side_offsets) % 4
+        target_sides = torch.randint(0, 4, (num_samples,), device=self.device)
         start_pos = self._edge_positions_from_sides(
             start_sides,
             self.cfg.spawn_edge_distance,
@@ -513,35 +511,6 @@ class QuadcopterObstaclesEnv(gym.Env):
             self.cfg.target_min_height,
             self.cfg.target_max_height,
         )
-
-        interior_margin = 0.5
-        for _ in range(8):
-            midpoint_xy = 0.5 * (start_pos[:, :2] + target_pos[:, :2])
-            crosses_interior = torch.all(
-                midpoint_xy.abs() < (self.cfg.map_half_extent - interior_margin),
-                dim=1,
-            )
-            invalid = ~crosses_interior
-            if not invalid.any():
-                break
-            n_invalid = int(invalid.sum().item())
-            start_sides[invalid] = torch.randint(0, 4, (n_invalid,), device=self.device)
-            side_offsets = torch.randint(1, 4, (n_invalid,), device=self.device)
-            target_sides[invalid] = (start_sides[invalid] + side_offsets) % 4
-            start_pos[invalid] = self._edge_positions_from_sides(
-                start_sides[invalid],
-                self.cfg.spawn_edge_distance,
-                self.cfg.spawn_edge_distance,
-                self.cfg.spawn_min_height,
-                self.cfg.spawn_max_height,
-            )
-            target_pos[invalid] = self._edge_positions_from_sides(
-                target_sides[invalid],
-                self.cfg.target_spawn_range,
-                self.cfg.target_spawn_range,
-                self.cfg.target_min_height,
-                self.cfg.target_max_height,
-            )
         return start_pos, target_pos
 
     def _sample_obstacle_positions(self, obstacle_indices: torch.Tensor) -> torch.Tensor:
@@ -1003,7 +972,7 @@ class QuadcopterObstaclesEnv(gym.Env):
         if env_ids.numel() == 0:
             return self._get_observations() # 如果数组为空直接返回当前观测
 
-        # 起点和目标都从边缘采样，但目标不能与起点同边，且二者连线必须穿过地图内部。
+        # 起点和目标按 NavRL 的边界区域逻辑独立采样。
         start_pos, target_pos = self._sample_navigation_position_pairs(len(env_ids))
 
         # default_root_state 是底层资产默认 root state 的模板拷贝，形状为 (num_envs, 13) 
@@ -1036,9 +1005,13 @@ class QuadcopterObstaclesEnv(gym.Env):
         # 同步更新与该环境相关的所有的张量缓存与“逻辑状态量”。
         self._target_positions_w[env_ids] = target_pos
         self._done_buf[env_ids] = False
+        self._episode_success_buf[env_ids] = False
         self._rew_buf[env_ids] = 0.0
         self.episode_length_buf[env_ids] = 0
         self._cmd_vel_b[env_ids] = 0.0
+        self._prev_drone_vel_w[env_ids] = 0.0
+        self._height_range[env_ids, 0] = torch.minimum(start_pos[:, 2], target_pos[:, 2])
+        self._height_range[env_ids, 1] = torch.maximum(start_pos[:, 2], target_pos[:, 2])
 
         # 将被重置飞机的内部控制器状态同步归零和重置。
         controller_state = {
@@ -1124,85 +1097,47 @@ class QuadcopterObstaclesEnv(gym.Env):
         self.episode_length_buf += 1
 
         # ==================== reward 计算 (奖励塑形 Reward Shaping) ====================
-        # 这部分是引导强化学习网络收敛的核心。
+        # 对齐 NavRL：朝目标速度 + 静态障碍安全奖励 - 平滑惩罚 - 高度惩罚 + 常数项。
         root_quat_w = self.robot.data.root_quat_w
-        root_lin_vel_b = quat_apply_inverse(root_quat_w, self.robot.data.root_lin_vel_w)
-        root_ang_vel_b = quat_apply_inverse(root_quat_w, self.robot.data.root_ang_vel_w)
         target_vec_w = self._target_positions_w - self.robot.data.root_pos_w
         
         # 当前到目标的欧氏绝对距离。
         distance_to_target = torch.linalg.norm(target_vec_w, dim=1)
         target_direction = target_vec_w / distance_to_target.unsqueeze(1).clamp_min(1e-6) # 目标方向单位向量
-        distance_to_target_norm = (
-            distance_to_target / self.cfg.target_distance_observation_scale()
-        ).clamp(0.0, 1.0)
 
-        # 计算控制器是否很好地跟随了 RL 网络给出的速度指令
-        velocity_cmd_frame = torch.stack(
-            [
-                root_lin_vel_b[:, 0],
-                root_lin_vel_b[:, 1],
-                self.robot.data.root_lin_vel_w[:, 2], # 注意 Z 轴由于配置，使用的是世界系竖直速度
-            ],
-            dim=1,
-        )
-        cmd_scale = torch.tensor(
-            [
-                max(float(self.cfg.cmd_body_vel_xy_max), 1e-6),
-                max(float(self.cfg.cmd_body_vel_xy_max), 1e-6),
-                max(float(self.cfg.cmd_vel_z_max), 1e-6),
-            ],
-            device=self.device,
-            dtype=velocity_cmd_frame.dtype,
-        )
-        velocity_cmd_frame_norm = velocity_cmd_frame / cmd_scale
-        cmd_vel_b_norm = self._cmd_vel_b / cmd_scale
-        # 跟踪误差：指令与真实速度在张量层面的均方差
-        vel_tracking_sq_error = torch.sum(torch.square(cmd_vel_b_norm - velocity_cmd_frame_norm), dim=1)
-        vel_tracking_error = torch.linalg.norm(cmd_vel_b_norm - velocity_cmd_frame_norm, dim=1)
-        # 使用 e^(-error) 的指数形式将无界误差转换为 (0, 1] 的平滑追踪奖励
-        vel_tracking = torch.exp(-self.cfg.vel_tracking_exp_scale * vel_tracking_sq_error)
-        
-        # 提取归一化角速度平方（后面做负向惩罚以抑制抖动）
-        root_ang_vel_b_norm = root_ang_vel_b / self.cfg.yaw_rate_observation_scale()
-        ang_vel = torch.sum(torch.square(root_ang_vel_b_norm), dim=1)
-
-        # 1. 绝对距离奖励：改为基于归一化距离的无量纲奖励，越靠近目标越接近 1。
-        distance_reward = 1.0 - distance_to_target_norm
-        
-        # 2. 目标方向速度奖励：
-        # 计算机体速度在目标向量上的投影。这是驱动飞机朝目标飞行的最直接正向动力。
-        target_velocity = torch.sum(self.robot.data.root_lin_vel_w * target_direction, dim=1)
-        target_velocity = target_velocity / self.cfg.target_velocity_reward_scale_value()
-        
-        # 3. Progress 奖励 (势能奖励)：
-        # 计算相比上一时刻，是否进一步缩短了距离。
-        # 用单步理论最大前进距离做归一化，避免“每步进度几厘米”这种米制量级过小。
-        max_progress_per_step = max(float(self.cfg.cmd_body_vel_xy_max) * float(self.step_dt), 1e-6)
-        progress_reward = ((self._prev_dist_to_target - distance_to_target) / max_progress_per_step).clamp(-1.0, 1.0)
-        self._prev_dist_to_target = distance_to_target.clone()
-
-        # 4. 到达目标的当前步标记：仿照 NavRL，只统计当前是否位于目标半径内，不做 episode 内锁存。
+        # 到达目标的当前步标记，并锁存当前 episode 是否曾经到达过目标。
         target_reached = distance_to_target < self.cfg.target_reach_threshold
+        self._episode_success_buf |= target_reached
 
-        # 5. 避障奖励和碰撞判定：仿照 NavRL，静态障碍只通过 LiDAR/RayCaster 距离判断。
-        # _compute_front_ray_distances() 返回 [0, 1] 归一化距离，这里还原成米制距离用于 reward 和 termination。
+        # NavRL 的静态障碍安全奖励：对各个方向的障碍距离取 log 后求均值。
         lidar_distances_norm = self._compute_front_ray_distances(self.robot.data.root_pos_w, root_quat_w)
-        closest_hazard_distance = lidar_distances_norm.min(dim=1).values * self.cfg.obstacle_detection_range
-        
-        # 接近危险区域时的指数软惩罚，越靠近惩罚越大。
-        obstacle_proximity = torch.where(
-            closest_hazard_distance < self.cfg.obstacle_proximity_trigger_distance,
-            torch.exp(-closest_hazard_distance * 3.0),
-            torch.zeros_like(closest_hazard_distance),
-        )
-        obstacle_proximity_penalty = obstacle_proximity * abs(self.cfg.obstacle_proximity_reward_scale) * self.step_dt
-        obstacle_proximity_penalty = obstacle_proximity_penalty.clamp_max(self.cfg.obstacle_proximity_max_cost)
+        lidar_distances = lidar_distances_norm * self.cfg.obstacle_detection_range
+        reward_safety_static = torch.log(
+            lidar_distances.clamp(min=1.0e-6, max=self.cfg.obstacle_detection_range)
+        ).mean(dim=1)
 
         # 判断是否发生了严重硬碰撞（任意 LiDAR 束命中距离小于安全余量）
+        closest_hazard_distance = lidar_distances.min(dim=1).values
         obstacle_collision = closest_hazard_distance < self.cfg.obstacle_collision_margin
-        
+
+        # NavRL 的朝目标速度奖励
+        reward_vel = torch.sum(self.robot.data.root_lin_vel_w * target_direction, dim=1)
+
+        # NavRL 的平滑惩罚：惩罚相邻两步的速度跳变
+        penalty_smooth = torch.linalg.norm(self.robot.data.root_lin_vel_w - self._prev_drone_vel_w, dim=1)
+
+        # NavRL 的高度惩罚：超过起终点高度带上下 0.2m 才开始惩罚
         root_pos_w = self.robot.data.root_pos_w
+        lower_height = self._height_range[:, 0] - self.cfg.height_penalty_margin
+        upper_height = self._height_range[:, 1] + self.cfg.height_penalty_margin
+        penalty_height = torch.zeros(self.num_envs, device=self.device)
+        above_band = root_pos_w[:, 2] > upper_height
+        below_band = root_pos_w[:, 2] < lower_height
+        penalty_height[above_band] = torch.square(root_pos_w[above_band, 2] - upper_height[above_band])
+        penalty_height[below_band] = torch.square(lower_height[below_band] - root_pos_w[below_band, 2])
+
+        self._prev_drone_vel_w[:] = self.robot.data.root_lin_vel_w
+
         # 判断高度是否坠毁或飞出安全高度区间
         too_low = root_pos_w[:, 2] < self.cfg.min_flight_height
         too_high = root_pos_w[:, 2] > self.cfg.max_flight_height
@@ -1219,14 +1154,12 @@ class QuadcopterObstaclesEnv(gym.Env):
         # 综合终止条件。out_of_bounds 是普通失败，不进入 SSAC 大 C 安全惩罚。
         died = too_low | too_high | obstacle_collision | out_of_bounds
 
-        # 把上面计算的奖励乘上对应的配置项权重，并且对连续时间项乘上 dt，保持与物理帧率无关性。
         rewards = {
-            "vel_tracking": vel_tracking * self.cfg.vel_tracking_reward_scale * self.step_dt,
-            "ang_vel": ang_vel * self.cfg.ang_vel_reward_scale * self.step_dt,
-            "distance_to_target": distance_reward * self.cfg.distance_to_target_reward_scale * self.step_dt,
-            "target_velocity": target_velocity * self.cfg.target_velocity_reward_scale * self.step_dt,
-            "progress": progress_reward * self.cfg.progress_reward_scale * self.step_dt,
-            "obstacle_proximity": -obstacle_proximity_penalty,
+            "survival": torch.full((self.num_envs,), float(self.cfg.survival_reward), device=self.device),
+            "safety_static": reward_safety_static * self.cfg.safety_static_reward_scale,
+            "velocity_to_goal": reward_vel * self.cfg.velocity_to_goal_reward_scale,
+            "smoothness": -penalty_smooth * self.cfg.smoothness_penalty_scale,
+            "height": -penalty_height * self.cfg.height_penalty_scale,
         }
         
         # 沿字典纵轴向把各项张量堆叠(stack)后求和，得出每个环境的单一总奖励值向量
@@ -1235,7 +1168,6 @@ class QuadcopterObstaclesEnv(gym.Env):
         # 累加统计日志用的记录本
         for key, value in rewards.items():
             self._episode_sums[key] += value
-        self._episode_sums["vel_tracking_error"] += vel_tracking_error * self.step_dt
         self._rew_buf[:] = reward # 写入总奖励缓存
 
         # 如果开启了打印 Debug，则每隔定量的全局步数，在前台打印出平均奖励分布。
@@ -1243,16 +1175,16 @@ class QuadcopterObstaclesEnv(gym.Env):
             print(
                 "[REWARD DEBUG] "
                 f"step={self.common_step_counter} "
-                f"progress={rewards['progress'].mean().item():+.4f} "
-                f"target_vel={rewards['target_velocity'].mean().item():+.4f} "
-                f"dist={rewards['distance_to_target'].mean().item():+.4f} "
-                f"obs_prox={rewards['obstacle_proximity'].mean().item():+.4f}"
+                f"vel_goal={rewards['velocity_to_goal'].mean().item():+.4f} "
+                f"safety={rewards['safety_static'].mean().item():+.4f} "
+                f"smooth={rewards['smoothness'].mean().item():+.4f} "
+                f"height={rewards['height'].mean().item():+.4f}"
             )
 
         # ==================== 终止条件判定 (Termination / Truncation) ====================
         # Truncation (时间耗尽，被截断)
         timeout = self.episode_length_buf >= self.max_episode_length 
-        # Termination (自然终止)：仿照 NavRL，到达目标只作为成功统计，不立即重置；只在违规/坠毁时终止。
+        # Termination (自然终止)：到达目标只作为成功统计，不立即重置；只在违规/坠毁时终止。
         terminated = died
         self._done_buf[:] = terminated | timeout # 任一结束条件满足，这回合即结束。
 
@@ -1260,6 +1192,7 @@ class QuadcopterObstaclesEnv(gym.Env):
         extras = {
             "time_outs": timeout.clone(),
             "target_reached": target_reached.clone(),
+            "episode_success": self._episode_success_buf.clone(),
             "terminated": terminated.clone(),
             "violation": obstacle_collision.clone(),
             "too_low": too_low.clone(),
@@ -1272,17 +1205,15 @@ class QuadcopterObstaclesEnv(gym.Env):
         # 获取所有本步骤刚刚完结的那些特定环境的索引（例如第 3、7 架飞机死了或到了）。
         done_ids = torch.nonzero(self._done_buf, as_tuple=False).squeeze(-1)
         if done_ids.numel() > 0: # 如果存在完结的环境
-            # 统计这一波结束的环境里的成功率。
-            batch_success_rate = target_reached[done_ids].float().mean().item()
+            # 统计这一波结束的环境里的成功率：只要 episode 内曾经到达目标，就记为成功。
+            episode_success = self._episode_success_buf[done_ids]
+            batch_success_rate = episode_success.float().mean().item()
 
             log = {}
             for key in self._episode_sums:
                 # 遍历累加器里的内容，把整个 episode 积累的总奖励除以该环境生命期的总秒数，得出归一化的平均项强度。
                 episodic_sum_avg = torch.mean(self._episode_sums[key][done_ids])
-                if key == "vel_tracking_error":
-                    log["Metrics/avg_vel_tracking_error"] = episodic_sum_avg / self.max_episode_length_s
-                else:
-                    log[f"Episode_Reward/{key}"] = episodic_sum_avg / self.max_episode_length_s
+                log[f"Episode_Reward/{key}"] = episodic_sum_avg / self.max_episode_length_s
             
             # 追加到 tensorboard 的各个诊断数据项的计数（在这个批次里，死于各类死法的人数）。
             log["Episode_Termination/died"] = torch.count_nonzero(died[done_ids]).item()
@@ -1292,8 +1223,9 @@ class QuadcopterObstaclesEnv(gym.Env):
             log["Episode_Termination/out_of_bounds"] = torch.count_nonzero(out_of_bounds[done_ids]).item()
             log["Episode_Termination/obstacle_collision"] = torch.count_nonzero(obstacle_collision[done_ids]).item()
             log["Episode_Termination/target_reached"] = torch.count_nonzero(target_reached[done_ids]).item()
+            log["Episode_Termination/episode_success"] = torch.count_nonzero(episode_success).item()
             log["Metrics/success_rate"] = batch_success_rate
-            log["Metrics/success_rate_all_envs"] = target_reached.float().mean().item()
+            log["Metrics/success_rate_all_envs"] = self._episode_success_buf.float().mean().item()
             log["Metrics/avg_closest_hazard_distance"] = closest_hazard_distance.mean().item()
             extras["log"] = log # 将日志丢进 extras 传出
 

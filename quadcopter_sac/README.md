@@ -1,97 +1,69 @@
-# MBPO Teacher: Obstacle Avoidance & Single Target Navigation
-This task folder now targets a staged **MBPO + SAC** teacher setup for the obstacle-navigation quadcopter environment.
+# rsl_rl SAC Teacher: Obstacle Avoidance & Target Navigation
 
-<p align="center">
-<img src="../../docs/figures/obstacles.gif" alt="Obstacle Avoidance Demo" width="600">
+This task trains the compact lidar obstacle-navigation quadcopter environment with a standard Soft Actor-Critic path built into the vendored `rsl_rl` library.
 
+## Task
 
+The policy controls high-level body-frame velocity commands:
 
+- `vx`, `vy` in the drone body frame
+- `vz` in the world vertical axis
 
+The observation is the environment's compact `policy` vector:
 
-<em>Teacher environment for model-based obstacle navigation experiments.</em>
-</p>
-
-## 🎯 Task Objective
-
-The agent must fly to **one random target point** without colliding.
-
-* **Navigation:** Reach within 0.8m of the sampled target to finish the episode.
-* **Perception:** Detect and evade 50 randomly placed pillars (Static Obstacles).
-* **Constraint:** The obstacles are generated procedurally every reset, preventing map memorization.
-
-
-## 🧠 Observation Space
-
-The current policy/model state is a compact **36-D** vector:
-
-- Body-frame linear velocity, angular velocity, and projected gravity
-- Goal represented as `target_dist / angle_to_target / z_diff`
-- Current command velocity
-- Altitude and closest-obstacle distance
-- Forward obstacle distance and goal-direction obstacle distance
-- **16** forward 180-degree horizontal rays
-- Episode progress
-
-
-
-## 📉 Reward Function: The Safety-Speed Trade-off
-
-The reward function is designed to balance the "Greedy" desire to reach the goal with the "Fear" of collision.
-
-1. **Target Navigation:**
-
-
-* Includes dense progress/velocity shaping and a smaller sparse bonus for reaching the target.
-
-
-2. **Obstacle Repulsion (Safety Bubble):**
-We use an exponential penalty that activates sharply only when getting too close (< 1.0m).
-
-
-
-
+- body-frame linear velocity
+- yaw rate
+- target distance, target bearing, and target height delta
+- current command velocity
+- altitude
+- 35 normalized horizontal lidar/raycast distances
 
 ## Training
 
-Use the MBPO trainer in this folder:
-
 ```bash
-python train_mbpo.py --headless --device cuda:0 --epochs 200
+cd /home/wei/End_to_end/drone_isaac/quadcopter_sac
+/home/wei/IsaacLab/isaaclab.sh -p train.py --headless --device cuda:0 --num_envs 1024 --max_iterations 5000
 ```
 
-Recommended stable bring-up command:
+Small bring-up command:
 
 ```bash
-python train_mbpo.py \
+cd /home/wei/End_to_end/drone_isaac/quadcopter_sac
+/home/wei/IsaacLab/isaaclab.sh -p train.py \
   --headless \
   --device cuda:0 \
-  --epochs 10 \
-  --steps_per_epoch 200 \
-  --buffer_min 512 \
-  --rollout_batch_size 64 \
-  --model_initial_steps 200 \
-  --model_steps 100 \
-  --solver_updates_per_step 1
+  --num_envs 32 \
+  --max_iterations 5 \
+  --random_steps 128 \
+  --learning_starts 128 \
+  --batch_size 128 \
+  --replay_buffer_size 20000 \
+  --gradient_steps_per_iteration 10
 ```
 
-Notes:
+Logs and checkpoints are written under:
 
-- Alpha autotuning is disabled by default for now because the Isaac GPU run was unstable with the original temperature-update path.
-- Re-enable it only if you explicitly want to test it: `--enable_alpha_autotune`
-- Detailed rollout / solver debug logs stay off by default and can be enabled with `--debug_step_logs`
+```text
+/home/wei/End_to_end/logs/rsl_rl/quadcopter_sac/
+```
 
-## MBPO Core Migration
+The default replay buffer stores `10_000_000` transitions on CPU memory. Sampled batches are moved to the training device before SAC updates.
+Actor and critics are updated at the same frequency. Warmup exploration has only a light forward bias in the drone body frame (`vx` mean 0.20) so early replay data remains diverse while still containing attempts to enter the map.
 
-This task folder contains a staged `mbpo_core/` package with the reusable pieces migrated from `Safe-MBPO-main`:
+The SAC policy uses a NavRL-style CNN+MLP encoder:
 
-- `dynamics.py`: probabilistic ensemble dynamics model
-- `sac.py`: soft actor-critic core
-- `sampling.py`: generic replay buffer
-- `smbpo.py`: environment-agnostic `SMBPOCore` skeleton prepared for later integration
+- low-dimensional state: first 11 observation values
+- 2-D lidar: last 35 values reshaped to `(N, 1, 35, 1)`
+- lidar CNN: Conv2d `1->4`, Conv2d `4->16`, Conv2d `16->16`, then Linear to 128
+- fusion MLP: `[lidar_feature_128, state_11] -> 256 -> 256`
+- SAC actor and twin critics use separate encoders; target critics keep separate soft-updated target encoders.
 
-These modules are now the primary training path for this task. The previous PPO-specific runner config has been removed from this package.
+## Implementation
 
-Current status:
+The SAC path uses:
 
-- `train_mbpo.py` is a staged single-environment trainer intended for algorithm bring-up, not large-scale Isaac parallel training yet.
-- The MBPO adapter directly uses the environment's compact policy observation as the model state.
+- `rsl_rl.modules.ActorCriticSAC`
+- `rsl_rl.algorithms.SAC`
+- `rsl_rl.storage.ReplayBuffer`
+- `rsl_rl.runners.OffPolicyRunner`
+- `quadcopter_sac/agents/rsl_rl_sac_cfg.py`

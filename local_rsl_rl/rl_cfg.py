@@ -89,6 +89,73 @@ class RslRlPpoAlgorithmCfg:
 
 
 @configclass
+class RslRlSacActorCriticCfg:
+    class_name: str = "ActorCriticSAC"
+    actor_hidden_dims: list[int] = MISSING
+    critic_hidden_dims: list[int] = MISSING
+    feature_hidden_dims: list[int] | None = None
+    activation: str = "elu"
+    actor_obs_normalization: bool | None = None
+    critic_obs_normalization: bool | None = None
+    use_lidar_cnn: bool = False
+    state_dim: int | None = None
+    lidar_start_idx: int | None = None
+    lidar_dim: int | None = None
+    lidar_shape: list[int] | None = None
+    lidar_latent_dim: int = 128
+    log_std_min: float = -20.0
+    log_std_max: float = 2.0
+
+
+@configclass
+class RslRlSacAlgorithmCfg:
+    class_name: str = "SAC"
+    learning_rate: float = 1.0e-4
+    critic_learning_rate: float | None = 5.0e-4
+    alpha_learning_rate: float | None = 1.0e-4
+    gamma: float = 0.99
+    tau: float = 0.005
+    batch_size: int = 1024
+    target_entropy: float | None = None
+    init_alpha: float = 0.2
+    min_alpha: float = 0.02
+    autotune_alpha: bool = True
+    actor_update_interval: int = 2
+    max_grad_norm: float | None = 1.0
+
+
+@configclass
+class RslRlOffPolicyRunnerCfg:
+    seed: int = 42
+    device: str = "cuda:0"
+    num_steps_per_env: int = MISSING
+    max_iterations: int = MISSING
+    empirical_normalization: bool = False
+    obs_groups: dict[str, list[str]] = {"policy": ["policy"], "critic": ["policy"]}
+    policy: RslRlSacActorCriticCfg = MISSING
+    algorithm: RslRlSacAlgorithmCfg = MISSING
+    clip_actions: float | None = 1.0
+    save_interval: int = MISSING
+    experiment_name: str = MISSING
+    run_name: str = ""
+    logger: Literal["tensorboard", "neptune", "wandb"] = "tensorboard"
+    resume: bool = False
+    load_run: str = ".*"
+    load_checkpoint: str = "model_.*.pt"
+    replay_buffer_size: int = 1_000_000
+    replay_buffer_device: str = "cpu"
+    replay_buffer_sample_interval: int = 1
+    warmup_iterations: int | None = None
+    random_steps: int = 1_000_000
+    learning_starts: int = 1_000_000
+    gradient_steps_per_iteration: int = 100
+    random_forward_action_mean: float = 0.20
+    random_forward_action_std: float = 0.60
+    random_lateral_action_std: float = 0.60
+    random_vertical_action_std: float = 0.10
+
+
+@configclass
 class RslRlOnPolicyRunnerCfg:
     seed: int = 42
     device: str = "cuda:0"
