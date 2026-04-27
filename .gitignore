@@ -1,0 +1,56 @@
+# Python cache/build artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE/editor files
+.idea/
+.vscode/*
+!.vscode/settings.json
+
+# Training outputs and experiment artifacts
+logs/
+**/logs/
+runs/
+**/runs/
+videos/
+**/videos/
+checkpoints/
+**/checkpoints/
+wandb/
+**/wandb/
+
+# TensorBoard / training metadata
+events.out.tfevents*
+*.tfevents*
+*.pkl
+*.pickle
+
+# Model/checkpoint artifacts
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.npz
+*.npy
+
+# Archives and local copies
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+* copy*/
+* copy*/
+
+# OS files
+.DS_Store
+Thumbs.db
