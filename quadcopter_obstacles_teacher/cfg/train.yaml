@@ -1,0 +1,6 @@
+wandb:
+  project: End_to_End_navigation
+  name: 5090_quadcopter_obstacles_teacher
+  entity: weimmmm-university-of-electronic-science-and-technology-
+  mode: online
+  run_id:

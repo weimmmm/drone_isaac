@@ -13,8 +13,9 @@ class QuadcopterObstaclesPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     max_iterations = 8000
     save_interval = 100
     experiment_name = "quadcopter_obstacles_v5"
+    run_name = "5090_quadcopter_obstacles_teacher"
     logger = "wandb"
-    wandb_project = "quadcopter_obstacles_teacher"
+    wandb_project = "End_to_End_navigation"
     empirical_normalization = True
     
     policy = RslRlPpoActorCriticCfg(

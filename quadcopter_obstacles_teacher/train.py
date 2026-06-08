@@ -35,9 +35,13 @@ parser.add_argument("--resume", action="store_true", default=False)
 parser.add_argument("--load_run", type=str, default=None)
 parser.add_argument("--checkpoint", type=str, default=None)
 parser.add_argument("--experiment_name", type=str, default=None)
+parser.add_argument("--cfg", type=str, default=os.path.join(TASK_DIR, "cfg", "train.yaml"))
 parser.add_argument("--logger", type=str, choices=["tensorboard", "wandb", "neptune"], default=None)
 parser.add_argument("--wandb_project", type=str, default=None)
+parser.add_argument("--wandb_name", type=str, default=None)
 parser.add_argument("--wandb_entity", type=str, default=None)
+parser.add_argument("--wandb_mode", type=str, default=None)
+parser.add_argument("--wandb_run_id", type=str, default=None)
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 
@@ -99,10 +103,47 @@ def _find_checkpoint(log_root: str, run_name: str, checkpoint_name: str) -> str:
     return os.path.join(run_path, checkpoints[-1])
 
 
+def _load_yaml_cfg(path: str | None) -> dict:
+    if path is None or not os.path.isfile(path):
+        return {}
+
+    import yaml
+
+    with open(path, "r", encoding="utf-8") as file:
+        return yaml.safe_load(file) or {}
+
+
+def _apply_wandb_cfg(agent_cfg, wandb_cfg: dict) -> None:
+    if not wandb_cfg:
+        return
+
+    project = wandb_cfg.get("project")
+    name = wandb_cfg.get("name")
+    entity = wandb_cfg.get("entity")
+    mode = wandb_cfg.get("mode")
+    run_id = wandb_cfg.get("run_id")
+
+    agent_cfg.logger = "wandb"
+    if project:
+        agent_cfg.wandb_project = project
+    if name:
+        agent_cfg.run_name = name
+    if entity:
+        os.environ["WANDB_USERNAME"] = str(entity)
+    if mode:
+        os.environ["WANDB_MODE"] = str(mode)
+    if run_id:
+        os.environ["WANDB_RUN_ID"] = str(run_id)
+        os.environ.setdefault("WANDB_RESUME", "allow")
+
+
 def main():
+    yaml_cfg = _load_yaml_cfg(args_cli.cfg)
+
     env_cfg = _load_cfg_from_registry(args_cli.task, "env_cfg_entry_point")
     agent_cfg = _load_cfg_from_registry(args_cli.task, "rsl_rl_cfg_entry_point")
     print("[DEBUG] Loaded env_cfg and agent_cfg")
+    _apply_wandb_cfg(agent_cfg, yaml_cfg.get("wandb", {}))
 
     if args_cli.num_envs is not None:
         env_cfg.scene.num_envs = args_cli.num_envs
@@ -120,8 +161,15 @@ def main():
         agent_cfg.logger = args_cli.logger
     if args_cli.wandb_project:
         agent_cfg.wandb_project = args_cli.wandb_project
+    if args_cli.wandb_name:
+        agent_cfg.run_name = args_cli.wandb_name
     if args_cli.wandb_entity:
         os.environ["WANDB_USERNAME"] = args_cli.wandb_entity
+    if args_cli.wandb_mode:
+        os.environ["WANDB_MODE"] = args_cli.wandb_mode
+    if args_cli.wandb_run_id:
+        os.environ["WANDB_RUN_ID"] = args_cli.wandb_run_id
+        os.environ.setdefault("WANDB_RESUME", "allow")
     if args_cli.resume:
         agent_cfg.resume = True
     if args_cli.load_run:
@@ -138,10 +186,18 @@ def main():
     log_dir = os.path.join(log_root_path, log_dir)
     os.makedirs(os.path.join(log_dir, "params"), exist_ok=True)
     print(f"[INFO] Logger: {agent_cfg.logger}")
+    if args_cli.cfg:
+        print(f"[INFO] Config file: {args_cli.cfg}")
     if agent_cfg.logger == "wandb":
         print(f"[INFO] WandB project: {agent_cfg.wandb_project}")
+        if agent_cfg.run_name:
+            print(f"[INFO] WandB run name: {agent_cfg.run_name}")
         if os.environ.get("WANDB_USERNAME"):
             print(f"[INFO] WandB entity: {os.environ['WANDB_USERNAME']}")
+        if os.environ.get("WANDB_MODE"):
+            print(f"[INFO] WandB mode: {os.environ['WANDB_MODE']}")
+        if os.environ.get("WANDB_RUN_ID"):
+            print(f"[INFO] WandB run id: {os.environ['WANDB_RUN_ID']}")
 
     print("[DEBUG] Creating gym environment")
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
