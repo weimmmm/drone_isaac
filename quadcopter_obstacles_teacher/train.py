@@ -18,6 +18,25 @@ for path in (ROOT_DIR, ENV_DIR, LOCAL_RSL_RL_DIR):
         sys.path.insert(0, path)
 
 
+def _ensure_conda_lib_first() -> None:
+    conda_prefix = os.environ.get("CONDA_PREFIX")
+    if not conda_prefix:
+        return
+
+    conda_lib = os.path.join(conda_prefix, "lib")
+    ld_paths = os.environ.get("LD_LIBRARY_PATH", "").split(os.pathsep)
+    if ld_paths and ld_paths[0] == conda_lib:
+        return
+
+    env = os.environ.copy()
+    env["LD_LIBRARY_PATH"] = os.pathsep.join([conda_lib, *[path for path in ld_paths if path]])
+    env["QUADCOPTER_TRAIN_REEXEC"] = "1"
+    os.execvpe(sys.executable, [sys.executable, *sys.argv], env)
+
+
+_ensure_conda_lib_first()
+
+
 from isaaclab.app import AppLauncher
 
 
@@ -26,8 +45,8 @@ parser.set_defaults(video= False)
 parser.add_argument("--video", dest="video", action="store_true")
 parser.add_argument("--no_video", dest="video", action="store_false")
 parser.add_argument("--video_length", type=int, default=250)
-parser.add_argument("--video_interval_iterations", type=int, default=5120)
-parser.add_argument("--num_envs", type=int, default=16)
+parser.add_argument("--video_interval_iterations", type=int, default=200)
+parser.add_argument("--num_envs", type=int, default=64)
 parser.add_argument("--task", type=str, default="Isaac-Quadcopter-Obstacles-Teacher-v0")
 parser.add_argument("--seed", type=int, default=None)
 parser.add_argument("--max_iterations", type=int, default=None)
@@ -47,6 +66,9 @@ args_cli = parser.parse_args()
 
 if args_cli.video:
     args_cli.enable_cameras = True
+if not args_cli.headless and not args_cli.experience:
+    # Avoid full editor test discovery in the default GUI experience.
+    args_cli.experience = "isaaclab.python.rendering.kit"
 
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
