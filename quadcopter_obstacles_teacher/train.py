@@ -11,7 +11,7 @@ from datetime import datetime
 TASK_DIR = os.path.abspath(os.path.dirname(__file__))
 ENV_DIR = os.path.abspath(os.path.join(TASK_DIR, ".."))
 ROOT_DIR = os.path.abspath(os.path.join(TASK_DIR, "..", ".."))
-LOCAL_RSL_RL_DIR = os.path.join(ROOT_DIR, "rsl_rl")
+LOCAL_RSL_RL_DIR = os.path.join(ENV_DIR, "rsl_rl")
 
 for path in (ROOT_DIR, ENV_DIR, LOCAL_RSL_RL_DIR):
     if path not in sys.path:
@@ -247,8 +247,11 @@ def main():
     print("[DEBUG] Wrapping environment for local rsl_rl")
     env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
     print("[DEBUG] Wrapped environment")
+    runner_cfg = class_to_dict(agent_cfg)
+    runner_cfg["evaluation"] = yaml_cfg.get("evaluation", {})
+
     print("[DEBUG] Initializing OnPolicyRunner")
-    runner = OnPolicyRunner(env, class_to_dict(agent_cfg), log_dir=log_dir, device=agent_cfg.device)
+    runner = OnPolicyRunner(env, runner_cfg, log_dir=log_dir, device=agent_cfg.device)
     print("[DEBUG] OnPolicyRunner initialized")
     runner.add_git_repo_to_log(__file__)
 

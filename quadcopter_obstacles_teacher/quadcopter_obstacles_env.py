@@ -67,8 +67,8 @@ class QuadcopterObstaclesEnvCfg:
     obstacle_collision_margin: float = 0.10
     target_obstacle_clearance: float = 2.0
 
-    spawn_edge_distance: float = 23.0
-    target_spawn_range: float = 23.0
+    spawn_edge_distance: float = 24.0
+    target_spawn_range: float = 24.0
     spawn_min_height: float = 0.5
     spawn_max_height: float = 2.5
     target_min_height: float = 0.5
@@ -131,6 +131,7 @@ class QuadcopterObstaclesEnv(gym.Env):
         self.max_episode_length_s = self.max_episode_length * self.step_dt
         self.num_states = 0
         self.common_step_counter = 0
+        self.training = True
 
         self.single_action_space = gym.spaces.Box(low=-1.0, high=1.0, shape=(self.cfg.action_space,), dtype=float)
         self.action_space = gym.vector.utils.batch_space(self.single_action_space, self.num_envs)
@@ -202,6 +203,14 @@ class QuadcopterObstaclesEnv(gym.Env):
 
     @property
     def unwrapped(self) -> QuadcopterObstaclesEnv:
+        return self
+
+    def train(self):
+        self.training = True
+        return self
+
+    def eval(self):
+        self.training = False
         return self
 
     @property
@@ -661,22 +670,34 @@ class QuadcopterObstaclesEnv(gym.Env):
         active_ids[env_ids] = False
         avoid_positions_xy = self.robot.data.root_pos_w[active_ids, :2] if self._built else None
 
-        start_pos = self._sample_edge_positions_with_clearance(
-            len(env_ids),
-            self.cfg.spawn_edge_distance,
-            self.cfg.spawn_min_height,
-            self.cfg.spawn_max_height,
-            min_separation=self.cfg.drone_spawn_min_separation,
-            avoid_positions_xy=avoid_positions_xy,
-        )
-        start_side_indices = self._infer_edge_side_indices(start_pos)
-        target_pos = self._sample_opposite_edge_positions_with_clearance(
-            start_side_indices,
-            self.cfg.target_min_height,
-            self.cfg.target_max_height,
-            min_separation=self.cfg.drone_spawn_min_separation,
-            avoid_obstacles=True,
-        )
+        if self.training:
+            start_pos = self._sample_edge_positions_with_clearance(
+                len(env_ids),
+                self.cfg.spawn_edge_distance,
+                self.cfg.spawn_min_height,
+                self.cfg.spawn_max_height,
+                min_separation=self.cfg.drone_spawn_min_separation,
+                avoid_positions_xy=avoid_positions_xy,
+            )
+            # Match NavRL: the target is sampled independently from the same four map edges,
+            # instead of being forced onto the edge opposite the drone spawn.
+            target_pos = self._sample_edge_positions_with_clearance(
+                len(env_ids),
+                self.cfg.target_spawn_range,
+                self.cfg.target_min_height,
+                self.cfg.target_max_height,
+                min_separation=self.cfg.drone_spawn_min_separation,
+            )
+        else:
+            start_pos = torch.zeros((len(env_ids), 3), device=self.device)
+            target_pos = torch.zeros((len(env_ids), 3), device=self.device)
+            line_x = (env_ids.float() / max(self.num_envs, 1) - 0.5) * 32.0
+            start_pos[:, 0] = line_x
+            start_pos[:, 1] = self.cfg.spawn_edge_distance
+            start_pos[:, 2] = 2.0
+            target_pos[:, 0] = line_x
+            target_pos[:, 1] = -self.cfg.target_spawn_range
+            target_pos[:, 2] = 2.0
 
         root_state = self.robot.data.default_root_state.clone()
         diff = target_pos - start_pos

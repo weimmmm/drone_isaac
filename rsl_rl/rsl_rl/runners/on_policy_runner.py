@@ -74,6 +74,7 @@ class OnPolicyRunner:
         self.tot_time = 0
         self.current_learning_iteration = 0
         self.git_status_repos = [rsl_rl.__file__]
+        self.evaluation_cfg = self.cfg.get("evaluation", {}) or {}
         print("[DEBUG][OnPolicyRunner] __init__ complete", flush=True)
 
     def learn(self, num_learning_iterations: int, init_at_random_ep_len: bool = False):  # noqa: C901
@@ -176,6 +177,11 @@ class OnPolicyRunner:
                 # Save model
                 if it % self.save_interval == 0:
                     self.save(os.path.join(self.log_dir, f"model_{it}.pt"))
+                if self._should_evaluate(it, start_iter):
+                    eval_info = self.evaluate()
+                    self._log_evaluation(eval_info, it)
+                    obs = self.env.reset().to(self.device)
+                    self.train_mode()
 
             # Clear episode infos
             ep_infos.clear()
@@ -347,6 +353,99 @@ class OnPolicyRunner:
             self.alg.policy.to(device)
         return self.alg.policy.act_inference
 
+    def evaluate(self) -> dict[str, float]:
+        """Evaluate the current policy with deterministic actions and first-done episode stats."""
+        eval_steps = int(self.evaluation_cfg.get("steps", self.env.max_episode_length))
+        eval_steps = max(eval_steps, 1)
+
+        unwrapped_env = getattr(self.env, "unwrapped", None)
+        if hasattr(unwrapped_env, "eval"):
+            unwrapped_env.eval()
+
+        obs = self.env.reset().to(self.device)
+        policy = self.get_inference_policy(device=self.device)
+
+        num_envs = self.env.num_envs
+        done_seen = torch.zeros(num_envs, dtype=torch.bool, device=self.device)
+        first_success = torch.zeros(num_envs, dtype=torch.bool, device=self.device)
+        first_timeout = torch.zeros(num_envs, dtype=torch.bool, device=self.device)
+        first_collision = torch.zeros(num_envs, dtype=torch.bool, device=self.device)
+        first_target_distance = torch.zeros(num_envs, dtype=torch.float, device=self.device)
+        first_obstacle_distance = torch.zeros(num_envs, dtype=torch.float, device=self.device)
+        first_wall_distance = torch.zeros(num_envs, dtype=torch.float, device=self.device)
+        reward_sum = 0.0
+        reward_sq_sum = 0.0
+        speed_sum = 0.0
+        speed_xy_sum = 0.0
+        sample_count = 0
+
+        with torch.inference_mode():
+            for _ in range(eval_steps):
+                actions = policy(obs)
+                obs, rewards, dones, extras = self.env.step(actions.to(self.env.device))
+                obs = obs.to(self.device)
+                rewards = rewards.to(self.device)
+                dones_bool = dones.to(self.device).bool().reshape(-1)
+                sample_count += num_envs
+
+                reward_sum += rewards.sum().item()
+                reward_sq_sum += torch.square(rewards).sum().item()
+
+                robot = getattr(unwrapped_env, "robot", None)
+                if robot is not None:
+                    lin_vel_w = robot.data.root_lin_vel_w
+                    speed_sum += torch.linalg.norm(lin_vel_w, dim=1).sum().item()
+                    speed_xy_sum += torch.linalg.norm(lin_vel_w[:, :2], dim=1).sum().item()
+
+                new_done = dones_bool & (~done_seen)
+                if new_done.any():
+                    first_success[new_done] = extras.get("target_reached", torch.zeros_like(dones_bool))[new_done].bool()
+                    first_timeout[new_done] = extras.get("time_outs", torch.zeros_like(dones_bool))[new_done].bool()
+                    obstacle_collision = extras.get("obstacle_collision", torch.zeros_like(dones_bool)).bool()
+                    wall_collision = extras.get("wall_collision", torch.zeros_like(dones_bool)).bool()
+                    first_collision[new_done] = (obstacle_collision | wall_collision)[new_done]
+                    if "distance_to_target" in extras:
+                        first_target_distance[new_done] = extras["distance_to_target"][new_done].float()
+                    if "closest_obstacle_distance" in extras:
+                        first_obstacle_distance[new_done] = extras["closest_obstacle_distance"][new_done].float()
+                    if "closest_wall_distance" in extras:
+                        first_wall_distance[new_done] = extras["closest_wall_distance"][new_done].float()
+                    done_seen |= new_done
+
+                if bool(done_seen.all()):
+                    break
+
+        if hasattr(unwrapped_env, "train"):
+            unwrapped_env.train()
+
+        total_samples = sample_count
+        mean_reward = reward_sum / max(total_samples, 1)
+        reward_std = max(reward_sq_sum / max(total_samples, 1) - mean_reward**2, 0.0) ** 0.5
+        completed = done_seen.float()
+        success = first_success.float()
+        timeout = first_timeout.float()
+        collision = first_collision.float()
+        died = (done_seen & (~first_success) & (~first_timeout)).float()
+
+        done_count = completed.sum().clamp_min(1.0)
+        info = {
+            "Eval/episodes_done": completed.sum().item(),
+            "Eval/completion_rate": completed.mean().item(),
+            "Eval/success_rate": (success.sum() / done_count).item(),
+            "Eval/collision_rate": (collision.sum() / done_count).item(),
+            "Eval/died_rate": (died.sum() / done_count).item(),
+            "Eval/timeout_rate": (timeout.sum() / done_count).item(),
+            "Eval/mean_step_reward": mean_reward,
+            "Eval/std_step_reward": reward_std,
+            "Eval/avg_speed": speed_sum / max(total_samples, 1),
+            "Eval/avg_speed_xy": speed_xy_sum / max(total_samples, 1),
+        }
+        if done_seen.any():
+            info["Eval/final_target_distance_mean"] = first_target_distance[done_seen].mean().item()
+            info["Eval/final_obstacle_distance_mean"] = first_obstacle_distance[done_seen].mean().item()
+            info["Eval/final_wall_distance_mean"] = first_wall_distance[done_seen].mean().item()
+        return info
+
     def train_mode(self):
         # -- PPO
         self.alg.policy.train()
@@ -363,6 +462,23 @@ class OnPolicyRunner:
 
     def add_git_repo_to_log(self, repo_file_path):
         self.git_status_repos.append(repo_file_path)
+
+    def _should_evaluate(self, iteration: int, start_iteration: int) -> bool:
+        if not self.evaluation_cfg.get("enabled", False):
+            return False
+        interval = int(self.evaluation_cfg.get("interval", 0))
+        if interval <= 0:
+            return False
+        if iteration == start_iteration and not self.evaluation_cfg.get("eval_at_start", True):
+            return False
+        return iteration % interval == 0
+
+    def _log_evaluation(self, eval_info: dict[str, float], iteration: int) -> None:
+        print("[Eval] " + ", ".join(f"{key}={value:.4f}" for key, value in eval_info.items()))
+        if self.writer is None:
+            return
+        for key, value in eval_info.items():
+            self.writer.add_scalar(key, value, iteration)
 
     """
     Helper functions.

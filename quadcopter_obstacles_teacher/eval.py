@@ -8,7 +8,7 @@ import sys
 TASK_DIR = "/home/wei/End_to_end/drone_isaac/quadcopter_obstacles_teacher"
 ENV_DIR = os.path.abspath(os.path.join(TASK_DIR, ".."))
 ROOT_DIR = os.path.abspath(os.path.join(TASK_DIR, "..", ".."))
-LOCAL_RSL_RL_DIR = os.path.join(ROOT_DIR, "rsl_rl")
+LOCAL_RSL_RL_DIR = os.path.join(ENV_DIR, "rsl_rl")
 DEFAULT_MODEL_PATH = (
     "/home/wei/End_to_end/logs/rsl_rl/quadcopter_obstacles_v5/2026-03-13_16-30-27/model_1400.pt"
 )

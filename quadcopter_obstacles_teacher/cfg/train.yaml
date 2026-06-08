@@ -4,3 +4,9 @@ wandb:
   entity: weimmmm-university-of-electronic-science-and-technology-
   mode: online
   run_id:
+
+evaluation:
+  enabled: true
+  interval: 500
+  steps: 1500
+  eval_at_start: true
