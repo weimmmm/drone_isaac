@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import asdict
 from torch.utils.tensorboard import SummaryWriter
 
@@ -21,8 +22,12 @@ class WandbSummaryWriter(SummaryWriter):
     def __init__(self, log_dir: str, flush_secs: int, cfg):
         super().__init__(log_dir, flush_secs)
 
-        # Get the run name
-        run_name = os.path.split(log_dir)[-1]
+        # Get the run name in the same grouped style as NavRL:
+        # <experiment>/<MM-DD_HH-MM>
+        log_name = os.path.split(log_dir)[-1]
+        match = re.match(r"\d{4}-(\d{2}-\d{2})_(\d{2}-\d{2})", log_name)
+        time_name = f"{match.group(1)}_{match.group(2)}" if match else log_name
+        run_name = f"{cfg.get('run_name', log_name)}/{time_name}"
 
         try:
             project = cfg["wandb_project"]
