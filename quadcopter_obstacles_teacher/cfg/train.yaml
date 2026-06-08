@@ -9,4 +9,4 @@ evaluation:
   enabled: true
   interval: 500
   steps: 1500
-  eval_at_start: true
+  eval_at_start: false

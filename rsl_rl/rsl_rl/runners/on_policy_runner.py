@@ -178,6 +178,11 @@ class OnPolicyRunner:
                 if it % self.save_interval == 0:
                     self.save(os.path.join(self.log_dir, f"model_{it}.pt"))
                 if self._should_evaluate(it, start_iter):
+                    print(
+                        f"[Eval] starting evaluation at iteration {it} "
+                        f"for {int(self.evaluation_cfg.get('steps', self.env.max_episode_length))} steps",
+                        flush=True,
+                    )
                     eval_info = self.evaluate()
                     self._log_evaluation(eval_info, it)
                     obs = self.env.reset().to(self.device)
