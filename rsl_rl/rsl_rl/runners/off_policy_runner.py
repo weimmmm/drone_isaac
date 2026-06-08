@@ -88,11 +88,24 @@ class OffPolicyRunner:
                         actions = self.alg.act(obs)
                 next_obs, rewards, dones, extras = self.env.step(actions.to(self.env.device))
                 next_obs = next_obs.to(self.device)
+                
+                # Handling terminal observations correctly for SAC/off-policy bootstrapping
+                real_next_obs = next_obs
+                if "terminal_obs" in extras and "terminal_obs_mask" in extras:
+                    mask = extras["terminal_obs_mask"].to(self.device)
+                    trunc_idx = mask.nonzero(as_tuple=False).flatten()
+                    if trunc_idx.numel() > 0:
+                        real_next_obs = {}
+                        for k in next_obs.keys():
+                            real_next_obs[k] = next_obs[k].clone()
+                            if k in extras["terminal_obs"]:
+                                real_next_obs[k][trunc_idx] = extras["terminal_obs"][k].to(self.device)
+
                 rewards = rewards.to(self.device)
                 dones = dones.to(self.device)
                 should_store_transition = ((env_step_index + 1) % self.replay_buffer_sample_interval) == 0
                 if should_store_transition or torch.any(dones):
-                    self.replay_buffer.add(obs, actions, rewards, dones, next_obs, extras)
+                    self.replay_buffer.add(obs, actions, rewards, dones, real_next_obs, extras)
                 obs = next_obs
 
                 cur_reward_sum += rewards

@@ -12,7 +12,7 @@ import cv2
 import numpy as np
 
 
-TASK_DIR = "/home/wei/End_to_end/drone_isaac/quadcopter_obstacles_MBPO"
+TASK_DIR = "/home/wei/End_to_end/drone_isaac/quadcopter_obstacles_teacher"
 ENV_DIR = os.path.abspath(os.path.join(TASK_DIR, ".."))
 ROOT_DIR = os.path.abspath(os.path.join(TASK_DIR, "..", ".."))
 LOCAL_RSL_RL_DIR = os.path.join(ROOT_DIR, "rsl_rl")
@@ -63,7 +63,7 @@ class DatasetWriter:
         timestamp: float,
         depth_image_u8: np.ndarray,
         pos_w: np.ndarray,
-        target_goal_features: np.ndarray,
+        target_pos_b: np.ndarray,
         lin_vel_b: np.ndarray,
         teacher_cmd_b: np.ndarray,
         done: bool,
@@ -81,9 +81,9 @@ class DatasetWriter:
             "pos_w_x": float(pos_w[0]),
             "pos_w_y": float(pos_w[1]),
             "pos_w_z": float(pos_w[2]),
-            "target_dist": float(target_goal_features[0]),
-            "angle_to_target": float(target_goal_features[1]),
-            "z_diff": float(target_goal_features[2]),
+            "target_pos_b_x": float(target_pos_b[0]),
+            "target_pos_b_y": float(target_pos_b[1]),
+            "target_pos_b_z": float(target_pos_b[2]),
             "lin_vel_b_x": float(lin_vel_b[0]),
             "lin_vel_b_y": float(lin_vel_b[1]),
             "lin_vel_b_z": float(lin_vel_b[2]),
@@ -146,9 +146,9 @@ class DatasetWriter:
             "pos_w_x",
             "pos_w_y",
             "pos_w_z",
-            "target_dist",
-            "angle_to_target",
-            "z_diff",
+            "target_pos_b_x",
+            "target_pos_b_y",
+            "target_pos_b_z",
             "lin_vel_b_x",
             "lin_vel_b_y",
             "lin_vel_b_z",
@@ -198,9 +198,9 @@ def _default_dataset_out() -> str:
 
 def _extract_student_features(policy_obs, actions):
     lin_vel_b = policy_obs[:, 0:3]
-    target_goal_features = policy_obs[:, 9:12]
+    target_pos_b = policy_obs[:, 9:12]
     teacher_cmd_b = actions[:, 0:3]
-    return lin_vel_b, target_goal_features, teacher_cmd_b
+    return lin_vel_b, target_pos_b, teacher_cmd_b
 
 
 def _get_policy_obs(obs):
@@ -266,7 +266,7 @@ def main():
         from local_rsl_rl import RslRlVecEnvWrapper
         from rsl_rl.runners import OnPolicyRunner
 
-        import quadcopter_obstacles_MBPO  # noqa: F401
+        import quadcopter_obstacles_teacher  # noqa: F401
 
         log("imports_after_app_ok")
 
@@ -343,6 +343,7 @@ def main():
         action_sq_sum = torch.zeros(env.num_actions, device=args.device)
         final_target_distance = None
         final_obstacle_distance = None
+        final_wall_distance = None
 
         step_ids = torch.zeros(args.num_envs, dtype=torch.long, device=args.device)
         finished_envs = torch.zeros(args.num_envs, dtype=torch.bool, device=args.device)
@@ -360,7 +361,7 @@ def main():
                 actions[finished_envs] = 0.0
 
                 policy_obs = _get_policy_obs(obs)
-                lin_vel_b, target_goal_features, teacher_cmd_b = _extract_student_features(policy_obs, actions)
+                lin_vel_b, target_pos_b, teacher_cmd_b = _extract_student_features(policy_obs, actions)
 
                 obs, rew, dones, extras = env.step(actions)
                 if args.use_follow_camera_depth:
@@ -377,10 +378,10 @@ def main():
 
                 success_flags = extras["target_reached"].to(torch.bool)
                 timeout_flags = extras["time_outs"].to(torch.bool)
-                collision_flags = extras["obstacle_collision"].to(torch.bool)
+                collision_flags = (extras["obstacle_collision"] | extras["wall_collision"]).to(torch.bool)
 
                 if dataset_writer is not None:
-                    target_goal_features_np = target_goal_features.detach().cpu().numpy()
+                    target_pos_b_np = target_pos_b.detach().cpu().numpy()
                     lin_vel_b_np = lin_vel_b.detach().cpu().numpy()
                     teacher_cmd_b_np = teacher_cmd_b.detach().cpu().numpy()
                     pos_w_np = env.unwrapped.robot.data.root_pos_w.detach().cpu().numpy()
@@ -410,7 +411,7 @@ def main():
                             timestamp=timestamp,
                             depth_image_u8=depth_image_u8,
                             pos_w=pos_w_np[env_index],
-                            target_goal_features=target_goal_features_np[env_index],
+                            target_pos_b=target_pos_b_np[env_index],
                             lin_vel_b=lin_vel_b_np[env_index],
                             teacher_cmd_b=teacher_cmd_b_np[env_index],
                             done=bool(done_np[env_index]),
@@ -441,6 +442,7 @@ def main():
                 robot_pos_w = env.unwrapped.robot.data.root_pos_w
                 final_target_distance = torch.linalg.norm(target_world - robot_pos_w, dim=1)
                 final_obstacle_distance = env.unwrapped._compute_closest_obstacle_signed_distance(robot_pos_w)
+                final_wall_distance = env.unwrapped._compute_wall_signed_distance(robot_pos_w)
 
                 step_ids += 1
                 finished_envs |= done_flags
@@ -486,6 +488,9 @@ def main():
         if final_obstacle_distance is not None:
             log(f"final_obstacle_distance_mean={final_obstacle_distance.mean().item():.4f}")
             log(f"final_obstacle_distance_median={final_obstacle_distance.median().item():.4f}")
+        if final_wall_distance is not None:
+            log(f"final_wall_distance_mean={final_wall_distance.mean().item():.4f}")
+            log(f"final_wall_distance_median={final_wall_distance.median().item():.4f}")
         log(f"action_abs_mean={action_abs_mean}")
         log(f"action_rms={action_rms}")
 

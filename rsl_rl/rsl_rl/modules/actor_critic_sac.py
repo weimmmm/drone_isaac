@@ -57,21 +57,21 @@ class NavRlLidarStateEncoder(nn.Module):
         with torch.no_grad():
             dummy = torch.zeros(1, 1, self.lidar_hbeams, self.lidar_vbeams)
             conv = nn.Sequential(
-                nn.Conv2d(1, 4, kernel_size=(5, 1), padding=(2, 0)),
+                nn.Conv2d(1, 4, kernel_size=(5, 3), padding=(2, 1)),
                 act1,
-                nn.Conv2d(4, 16, kernel_size=(5, 1), stride=(2, 1), padding=(2, 0)),
+                nn.Conv2d(4, 16, kernel_size=(5, 3), stride=(2, 1), padding=(2, 1)),
                 act2,
-                nn.Conv2d(16, 16, kernel_size=(5, 1), stride=(2, 1), padding=(2, 0)),
+                nn.Conv2d(16, 16, kernel_size=(5, 3), stride=(2, 2), padding=(2, 1)),
                 act3,
                 nn.Flatten(),
             )
             conv_out_dim = int(conv(dummy).shape[-1])
         self.lidar_cnn = nn.Sequential(
-            nn.Conv2d(1, 4, kernel_size=(5, 1), padding=(2, 0)),
+            nn.Conv2d(1, 4, kernel_size=(5, 3), padding=(2, 1)),
             _activation(activation),
-            nn.Conv2d(4, 16, kernel_size=(5, 1), stride=(2, 1), padding=(2, 0)),
+            nn.Conv2d(4, 16, kernel_size=(5, 3), stride=(2, 1), padding=(2, 1)),
             _activation(activation),
-            nn.Conv2d(16, 16, kernel_size=(5, 1), stride=(2, 1), padding=(2, 0)),
+            nn.Conv2d(16, 16, kernel_size=(5, 3), stride=(2, 2), padding=(2, 1)),
             _activation(activation),
             nn.Flatten(),
             nn.Linear(conv_out_dim, int(lidar_latent_dim)),

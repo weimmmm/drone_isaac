@@ -33,7 +33,7 @@ def build_parser():
     parser.add_argument("--forward_cmd", type=float, default=0.6)
     parser.add_argument("--lateral_cmd", type=float, default=0.0)
     parser.add_argument("--vertical_cmd", type=float, default=0.0)
-    parser.add_argument("--num_rays", type=int, default=35)
+    parser.add_argument("--num_rays", type=int, default=144)
     parser.add_argument("--sleep", type=float, default=0.02)
     parser.add_argument("--debug_interval", type=int, default=20)
     AppLauncher.add_app_launcher_args(parser)

@@ -32,7 +32,7 @@ class QuadcopterObstaclesSACRunnerCfg(RslRlOffPolicyRunnerCfg):
     clip_actions = 1.0 
     
     # 经验回放池 (Replay Buffer) 的容量。1000万步的容量极大，说明你非常看重过往经验的复用。
-    replay_buffer_size = 10_000_000 
+    replay_buffer_size = 15_000_000 
     
     # 经验回放池存放的设备。由于 Buffer 极大，为了防止 GPU 显存溢出 (OOM)，放在 CPU 内存中。
     # 训练采样时再将 batch 数据搬运到 GPU。
@@ -42,7 +42,7 @@ class QuadcopterObstaclesSACRunnerCfg(RslRlOffPolicyRunnerCfg):
     
     # 在训练开始前，先跑多少个 rollout iteration 的 warmup 动作。
     # 实际 warmup 环境步数 = warmup_iterations * num_envs * num_steps_per_env。
-    warmup_iterations = 100
+    warmup_iterations = 20
 
     # 在训练开始前，执行 warmup 动作的步数；若设置 warmup_iterations，则由 runner 自动覆盖。
     random_steps = 1_000_000 
@@ -80,26 +80,26 @@ class QuadcopterObstaclesSACRunnerCfg(RslRlOffPolicyRunnerCfg):
         # 激活函数，ELU 在连续控制任务中由于平滑特性，通常表现优于 ReLU。
         activation="elu", 
         
-        # 是否对 Actor 网络的输入进行归一化。
-        actor_obs_normalization=True, 
+        # 环境观测已经按 NavRL 做了物理量归一化，避免对 LiDAR 占据值再做二次 running mean/std。
+        actor_obs_normalization=False, 
         
-        # 是否对 Critic 网络的输入进行归一化。
-        critic_obs_normalization=True, 
+        # Critic 同样直接使用 NavRL 语义的归一化观测。
+        critic_obs_normalization=False, 
         
-        # 启用 1D CNN 作为 Lidar 的特征提取器 (对于稀疏点云或测距阵列非常有效)。
+        # 启用 NavRL 风格 2D CNN 作为 3D LiDAR 的特征提取器。
         use_lidar_cnn=True, 
         
-        # 自身状态向量的维度 (例如：位置、姿态、线速度、角速度等，这里为 11 维)。
-        state_dim=11, 
+        # NavRL 风格 MLP 状态：8维目标方向坐标系状态 + 5个动态障碍物 * 10维。
+        state_dim=58, 
         
-        # 拼接后的总观测向量中，Lidar 数据的起始索引 (前 11 维是本体状态，之后是 Lidar)。
-        lidar_start_idx=11, 
+        # 拼接后的总观测向量中，Lidar 数据的起始索引。
+        lidar_start_idx=58, 
         
-        # Lidar 数据的展平维度 (35个测距点)。
-        lidar_dim=35, 
+        # NavRL 3D LiDAR 展平维度：36 个水平束 x 4 个垂直束。
+        lidar_dim=144, 
         
-        # Lidar 数据的原始形状 (35 个序列，通道数为 1)，适配一维卷积输入。
-        lidar_shape=[35, 1], 
+        # Lidar 数据的原始形状 (hbeams, vbeams)，适配 NavRL 的 2D CNN。
+        lidar_shape=[36, 4], 
         
         # Lidar 经过 CNN 提取特征后，输出的隐向量维度大小。
         lidar_latent_dim=128, 

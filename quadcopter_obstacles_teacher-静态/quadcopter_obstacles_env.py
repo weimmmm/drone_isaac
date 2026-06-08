@@ -62,7 +62,7 @@ class QuadcopterObstaclesEnvCfg:
     wall_thickness: float = 0.3
 
     # ==================== 障碍物配置 ====================
-    num_obstacles: int = 100
+    num_obstacles: int = 240
     num_closest_obstacles: int = 8
     obstacle_height: float = 4.0
     obstacle_radius: float = 0.15
