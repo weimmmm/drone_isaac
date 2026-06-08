@@ -1,1 +1,0 @@
-"""OmniNxt asset configuration."""
