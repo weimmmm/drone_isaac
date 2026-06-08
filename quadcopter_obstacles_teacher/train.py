@@ -35,6 +35,9 @@ parser.add_argument("--resume", action="store_true", default=False)
 parser.add_argument("--load_run", type=str, default=None)
 parser.add_argument("--checkpoint", type=str, default=None)
 parser.add_argument("--experiment_name", type=str, default=None)
+parser.add_argument("--logger", type=str, choices=["tensorboard", "wandb", "neptune"], default=None)
+parser.add_argument("--wandb_project", type=str, default=None)
+parser.add_argument("--wandb_entity", type=str, default=None)
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 
@@ -113,6 +116,12 @@ def main():
 
     if args_cli.experiment_name:
         agent_cfg.experiment_name = args_cli.experiment_name
+    if args_cli.logger:
+        agent_cfg.logger = args_cli.logger
+    if args_cli.wandb_project:
+        agent_cfg.wandb_project = args_cli.wandb_project
+    if args_cli.wandb_entity:
+        os.environ["WANDB_USERNAME"] = args_cli.wandb_entity
     if args_cli.resume:
         agent_cfg.resume = True
     if args_cli.load_run:
@@ -128,6 +137,11 @@ def main():
         log_dir += f"_{agent_cfg.run_name}"
     log_dir = os.path.join(log_root_path, log_dir)
     os.makedirs(os.path.join(log_dir, "params"), exist_ok=True)
+    print(f"[INFO] Logger: {agent_cfg.logger}")
+    if agent_cfg.logger == "wandb":
+        print(f"[INFO] WandB project: {agent_cfg.wandb_project}")
+        if os.environ.get("WANDB_USERNAME"):
+            print(f"[INFO] WandB entity: {os.environ['WANDB_USERNAME']}")
 
     print("[DEBUG] Creating gym environment")
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
