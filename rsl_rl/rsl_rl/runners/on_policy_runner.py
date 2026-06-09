@@ -34,7 +34,6 @@ class OnPolicyRunner:
     """On-policy runner for training and evaluation of actor-critic methods."""
 
     def __init__(self, env: VecEnv, train_cfg: dict, log_dir: str | None = None, device="cpu"):
-        print("[DEBUG][OnPolicyRunner] __init__ start", flush=True)
         self.cfg = train_cfg
         self.alg_cfg = train_cfg["algorithm"]
         self.policy_cfg = train_cfg["policy"]
@@ -48,20 +47,14 @@ class OnPolicyRunner:
         self.save_interval = self.cfg["save_interval"]
 
         # query observations from environment for algorithm construction
-        print("[DEBUG][OnPolicyRunner] querying initial observations", flush=True)
         obs = self.env.get_observations()
-        print("[DEBUG][OnPolicyRunner] initial observations ready", flush=True)
         default_sets = ["critic"]
         if "rnd_cfg" in self.alg_cfg and self.alg_cfg["rnd_cfg"] is not None:
             default_sets.append("rnd_state")
-        print("[DEBUG][OnPolicyRunner] resolving observation groups", flush=True)
         self.cfg["obs_groups"] = resolve_obs_groups(obs, self.cfg["obs_groups"], default_sets)
-        print("[DEBUG][OnPolicyRunner] observation groups resolved", flush=True)
 
         # create the algorithm
-        print("[DEBUG][OnPolicyRunner] constructing algorithm", flush=True)
         self.alg = self._construct_algorithm(obs)
-        print("[DEBUG][OnPolicyRunner] algorithm constructed", flush=True)
 
         # Decide whether to disable logging
         # We only log from the process with rank 0 (main process)
@@ -75,7 +68,6 @@ class OnPolicyRunner:
         self.current_learning_iteration = 0
         self.git_status_repos = [rsl_rl.__file__]
         self.evaluation_cfg = self.cfg.get("evaluation", {}) or {}
-        print("[DEBUG][OnPolicyRunner] __init__ complete", flush=True)
 
     def learn(self, num_learning_iterations: int, init_at_random_ep_len: bool = False):  # noqa: C901
         # initialize writer
@@ -178,14 +170,13 @@ class OnPolicyRunner:
                 if it % self.save_interval == 0:
                     self.save(os.path.join(self.log_dir, f"model_{it}.pt"))
                 if self._should_evaluate(it, start_iter):
-                    print(
-                        f"[Eval] starting evaluation at iteration {it} "
-                        f"for {int(self.evaluation_cfg.get('steps', self.env.max_episode_length))} steps",
-                        flush=True,
-                    )
-                    eval_info = self.evaluate()
+                    eval_info, obs = self.evaluate(obs)
                     self._log_evaluation(eval_info, it)
-                    obs = self.env.reset().to(self.device)
+                    cur_reward_sum.zero_()
+                    cur_episode_length.zero_()
+                    if self.alg.rnd:
+                        cur_ereward_sum.zero_()
+                        cur_ireward_sum.zero_()
                     self.train_mode()
 
             # Clear episode infos
@@ -358,23 +349,38 @@ class OnPolicyRunner:
             self.alg.policy.to(device)
         return self.alg.policy.act_inference
 
-    def evaluate(self) -> dict[str, float]:
-        """Evaluate the current policy with deterministic actions and first-done episode stats."""
-        eval_steps = int(self.evaluation_cfg.get("steps", self.env.max_episode_length))
+    def evaluate(self, obs: TensorDict) -> tuple[dict[str, float], TensorDict]:
+        """Evaluate like NavRL: eval reset, deterministic full-episode rollout, train reset."""
+        eval_steps_cfg = self.evaluation_cfg.get("steps", "max_episode_length")
+        if eval_steps_cfg in (None, "max_episode_length"):
+            eval_steps = int(self.env.max_episode_length)
+        else:
+            eval_steps = int(eval_steps_cfg)
         eval_steps = max(eval_steps, 1)
+        max_wall_time_s = float(self.evaluation_cfg.get("max_wall_time_s", 0.0))
 
         unwrapped_env = getattr(self.env, "unwrapped", None)
+        eval_start_time = time.time()
         if hasattr(unwrapped_env, "eval"):
             unwrapped_env.eval()
-
+        eval_seed = self.evaluation_cfg.get("seed", self.cfg.get("seed", -1))
+        if eval_seed is not None and hasattr(self.env, "seed"):
+            self.env.seed(int(eval_seed))
         obs = self.env.reset().to(self.device)
+
         policy = self.get_inference_policy(device=self.device)
 
         num_envs = self.env.num_envs
         done_seen = torch.zeros(num_envs, dtype=torch.bool, device=self.device)
+        episode_return = torch.zeros(num_envs, dtype=torch.float, device=self.device)
+        episode_length = torch.zeros(num_envs, dtype=torch.float, device=self.device)
+        first_return = torch.zeros(num_envs, dtype=torch.float, device=self.device)
+        first_episode_length = torch.zeros(num_envs, dtype=torch.float, device=self.device)
         first_success = torch.zeros(num_envs, dtype=torch.bool, device=self.device)
         first_timeout = torch.zeros(num_envs, dtype=torch.bool, device=self.device)
         first_collision = torch.zeros(num_envs, dtype=torch.bool, device=self.device)
+        first_too_low = torch.zeros(num_envs, dtype=torch.bool, device=self.device)
+        first_too_high = torch.zeros(num_envs, dtype=torch.bool, device=self.device)
         first_target_distance = torch.zeros(num_envs, dtype=torch.float, device=self.device)
         first_obstacle_distance = torch.zeros(num_envs, dtype=torch.float, device=self.device)
         first_wall_distance = torch.zeros(num_envs, dtype=torch.float, device=self.device)
@@ -385,7 +391,7 @@ class OnPolicyRunner:
         sample_count = 0
 
         with torch.inference_mode():
-            for _ in range(eval_steps):
+            for step in range(eval_steps):
                 actions = policy(obs)
                 obs, rewards, dones, extras = self.env.step(actions.to(self.env.device))
                 obs = obs.to(self.device)
@@ -393,8 +399,11 @@ class OnPolicyRunner:
                 dones_bool = dones.to(self.device).bool().reshape(-1)
                 sample_count += num_envs
 
-                reward_sum += rewards.sum().item()
-                reward_sq_sum += torch.square(rewards).sum().item()
+                rewards_flat = rewards.reshape(-1)
+                episode_return += rewards_flat
+                episode_length += (~done_seen).float()
+                reward_sum += rewards_flat.sum().item()
+                reward_sq_sum += torch.square(rewards_flat).sum().item()
 
                 robot = getattr(unwrapped_env, "robot", None)
                 if robot is not None:
@@ -404,11 +413,17 @@ class OnPolicyRunner:
 
                 new_done = dones_bool & (~done_seen)
                 if new_done.any():
-                    first_success[new_done] = extras.get("target_reached", torch.zeros_like(dones_bool))[new_done].bool()
+                    first_return[new_done] = episode_return[new_done]
+                    first_episode_length[new_done] = episode_length[new_done]
+                    first_success[new_done] = extras.get("target_reached", torch.zeros_like(dones_bool))[
+                        new_done
+                    ].bool()
                     first_timeout[new_done] = extras.get("time_outs", torch.zeros_like(dones_bool))[new_done].bool()
                     obstacle_collision = extras.get("obstacle_collision", torch.zeros_like(dones_bool)).bool()
                     wall_collision = extras.get("wall_collision", torch.zeros_like(dones_bool)).bool()
                     first_collision[new_done] = (obstacle_collision | wall_collision)[new_done]
+                    first_too_low[new_done] = extras.get("too_low", torch.zeros_like(dones_bool))[new_done].bool()
+                    first_too_high[new_done] = extras.get("too_high", torch.zeros_like(dones_bool))[new_done].bool()
                     if "distance_to_target" in extras:
                         first_target_distance[new_done] = extras["distance_to_target"][new_done].float()
                     if "closest_obstacle_distance" in extras:
@@ -417,11 +432,8 @@ class OnPolicyRunner:
                         first_wall_distance[new_done] = extras["closest_wall_distance"][new_done].float()
                     done_seen |= new_done
 
-                if bool(done_seen.all()):
+                if max_wall_time_s > 0.0 and (time.time() - eval_start_time) >= max_wall_time_s:
                     break
-
-        if hasattr(unwrapped_env, "train"):
-            unwrapped_env.train()
 
         total_samples = sample_count
         mean_reward = reward_sum / max(total_samples, 1)
@@ -430,16 +442,26 @@ class OnPolicyRunner:
         success = first_success.float()
         timeout = first_timeout.float()
         collision = first_collision.float()
+        too_low = first_too_low.float()
+        too_high = first_too_high.float()
         died = (done_seen & (~first_success) & (~first_timeout)).float()
 
         done_count = completed.sum().clamp_min(1.0)
         info = {
+            "eval/stats.return": first_return.mean().item(),
+            "eval/stats.episode_len": first_episode_length.mean().item(),
+            "eval/stats.reach_goal": success.mean().item(),
+            "eval/stats.collision": collision.mean().item(),
+            "eval/stats.truncated": timeout.mean().item(),
             "Eval/episodes_done": completed.sum().item(),
             "Eval/completion_rate": completed.mean().item(),
             "Eval/success_rate": (success.sum() / done_count).item(),
             "Eval/collision_rate": (collision.sum() / done_count).item(),
+            "Eval/too_low_rate": (too_low.sum() / done_count).item(),
+            "Eval/too_high_rate": (too_high.sum() / done_count).item(),
             "Eval/died_rate": (died.sum() / done_count).item(),
             "Eval/timeout_rate": (timeout.sum() / done_count).item(),
+            "Eval/duration_s": time.time() - eval_start_time,
             "Eval/mean_step_reward": mean_reward,
             "Eval/std_step_reward": reward_std,
             "Eval/avg_speed": speed_sum / max(total_samples, 1),
@@ -449,7 +471,11 @@ class OnPolicyRunner:
             info["Eval/final_target_distance_mean"] = first_target_distance[done_seen].mean().item()
             info["Eval/final_obstacle_distance_mean"] = first_obstacle_distance[done_seen].mean().item()
             info["Eval/final_wall_distance_mean"] = first_wall_distance[done_seen].mean().item()
-        return info
+
+        if hasattr(unwrapped_env, "train"):
+            unwrapped_env.train()
+        obs = self.env.reset().to(self.device)
+        return info, obs
 
     def train_mode(self):
         # -- PPO
@@ -479,7 +505,6 @@ class OnPolicyRunner:
         return iteration % interval == 0
 
     def _log_evaluation(self, eval_info: dict[str, float], iteration: int) -> None:
-        print("[Eval] " + ", ".join(f"{key}={value:.4f}" for key, value in eval_info.items()))
         if self.writer is None:
             return
         for key, value in eval_info.items():

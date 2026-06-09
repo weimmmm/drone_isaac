@@ -46,7 +46,7 @@ parser.add_argument("--video", dest="video", action="store_true")
 parser.add_argument("--no_video", dest="video", action="store_false")
 parser.add_argument("--video_length", type=int, default=250)
 parser.add_argument("--video_interval_iterations", type=int, default=200)
-parser.add_argument("--num_envs", type=int, default=5120)
+parser.add_argument("--num_envs", type=int, default=8192)
 parser.add_argument("--task", type=str, default="Isaac-Quadcopter-Obstacles-Teacher-v0")
 parser.add_argument("--seed", type=int, default=None)
 parser.add_argument("--max_iterations", type=int, default=None)
@@ -164,7 +164,6 @@ def main():
 
     env_cfg = _load_cfg_from_registry(args_cli.task, "env_cfg_entry_point")
     agent_cfg = _load_cfg_from_registry(args_cli.task, "rsl_rl_cfg_entry_point")
-    print("[DEBUG] Loaded env_cfg and agent_cfg")
     _apply_wandb_cfg(agent_cfg, yaml_cfg.get("wandb", {}))
 
     if args_cli.num_envs is not None:
@@ -221,9 +220,7 @@ def main():
         if os.environ.get("WANDB_RUN_ID"):
             print(f"[INFO] WandB run id: {os.environ['WANDB_RUN_ID']}")
 
-    print("[DEBUG] Creating gym environment")
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
-    print("[DEBUG] Gym environment created")
 
     if agent_cfg.resume:
         resume_path = _find_checkpoint(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
@@ -244,15 +241,11 @@ def main():
         print_dict(video_kwargs, nesting=4)
         env = gym.wrappers.RecordVideo(env, **video_kwargs)
 
-    print("[DEBUG] Wrapping environment for local rsl_rl")
     env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
-    print("[DEBUG] Wrapped environment")
     runner_cfg = class_to_dict(agent_cfg)
     runner_cfg["evaluation"] = yaml_cfg.get("evaluation", {})
 
-    print("[DEBUG] Initializing OnPolicyRunner")
     runner = OnPolicyRunner(env, runner_cfg, log_dir=log_dir, device=agent_cfg.device)
-    print("[DEBUG] OnPolicyRunner initialized")
     runner.add_git_repo_to_log(__file__)
 
     if resume_path:
@@ -265,9 +258,7 @@ def main():
     with open(os.path.join(log_dir, "params", "agent.pkl"), "wb") as file:
         pickle.dump(agent_cfg, file)
 
-    print("[DEBUG] Starting runner.learn")
     runner.learn(num_learning_iterations=agent_cfg.max_iterations, init_at_random_ep_len=True)
-    print("[DEBUG] runner.learn returned")
     env.close()
 
 

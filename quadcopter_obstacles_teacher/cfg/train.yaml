@@ -6,7 +6,8 @@ wandb:
   run_id:
 
 evaluation:
-  enabled: true
-  interval: 500
-  steps: 1500
+  enabled: False
+  interval: 1000
+  steps: 2200
+  max_wall_time_s: 0
   eval_at_start: false

@@ -73,6 +73,8 @@ class QuadcopterObstaclesEnvCfg:
     spawn_max_height: float = 2.5
     target_min_height: float = 0.5
     target_max_height: float = 2.5
+    flight_min_height: float = 0.1
+    flight_max_height: float = 4.0
     target_reach_threshold: float = 0.5
     drone_spawn_min_separation: float = 1.0
 
@@ -840,8 +842,8 @@ class QuadcopterObstaclesEnv(gym.Env):
         timeout = self.episode_length_buf >= self.max_episode_length
         obstacle_collision = closest_obstacle_distance < self.cfg.obstacle_collision_margin
         wall_collision = closest_wall_distance < self.cfg.obstacle_collision_margin
-        too_low = self.robot.data.root_pos_w[:, 2] < 0.1
-        too_high = self.robot.data.root_pos_w[:, 2] > 2.5
+        too_low = self.robot.data.root_pos_w[:, 2] < self.cfg.flight_min_height
+        too_high = self.robot.data.root_pos_w[:, 2] > self.cfg.flight_max_height
         died = too_low | too_high | obstacle_collision | wall_collision
         terminated = self._target_reached | died
         self._done_buf[:] = terminated | timeout
@@ -852,18 +854,12 @@ class QuadcopterObstaclesEnv(gym.Env):
             "terminated": terminated.clone(),
             "obstacle_collision": obstacle_collision.clone(),
             "wall_collision": wall_collision.clone(),
+            "too_low": too_low.clone(),
+            "too_high": too_high.clone(),
             "closest_obstacle_distance": closest_obstacle_distance.clone(),
             "closest_wall_distance": closest_wall_distance.clone(),
             "distance_to_target": distance_to_target.clone(),
         }
-
-        if self.common_step_counter % 500 == 0:
-            success_rate = self._target_reached.float().mean().item()
-            print(
-                f"[DEBUG] Step {self.common_step_counter}: died={died.sum().item()}, "
-                f"success={self._target_reached.sum().item()}, collision={(obstacle_collision | wall_collision).sum().item()}, "
-                f"success_rate={success_rate:.3f}"
-            )
 
         done_ids = torch.nonzero(self._done_buf, as_tuple=False).squeeze(-1)
         if done_ids.numel() > 0:
@@ -876,7 +872,16 @@ class QuadcopterObstaclesEnv(gym.Env):
                     log[f"Episode_Reward/{key}"] = episodic_sum_avg / self.max_episode_length_s
             log["Episode_Termination/died"] = torch.count_nonzero(died[done_ids]).item()
             log["Episode_Termination/time_out"] = torch.count_nonzero(timeout[done_ids]).item()
+            log["Episode_Termination/too_low"] = torch.count_nonzero(too_low[done_ids]).item()
+            log["Episode_Termination/too_high"] = torch.count_nonzero(too_high[done_ids]).item()
+            log["Episode_Termination/obstacle_collision"] = torch.count_nonzero(obstacle_collision[done_ids]).item()
+            log["Episode_Termination/wall_collision"] = torch.count_nonzero(wall_collision[done_ids]).item()
             log["Metrics/success_rate"] = self._target_reached[done_ids].float().mean().item()
+            log["Metrics/failure_rate"] = (died[done_ids] & (~self._target_reached[done_ids])).float().mean().item()
+            log["Metrics/too_low_rate"] = too_low[done_ids].float().mean().item()
+            log["Metrics/too_high_rate"] = too_high[done_ids].float().mean().item()
+            log["Metrics/obstacle_collision_rate"] = obstacle_collision[done_ids].float().mean().item()
+            log["Metrics/wall_collision_rate"] = wall_collision[done_ids].float().mean().item()
             log["Metrics/success_rate_all_envs"] = self._target_reached.float().mean().item()
             log["Metrics/avg_closest_hazard_distance"] = closest_hazard_distance.mean().item()
             extras["log"] = log
