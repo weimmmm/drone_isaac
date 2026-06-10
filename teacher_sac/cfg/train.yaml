@@ -1,0 +1,13 @@
+wandb:
+  project: End_to_End_navigation
+  name: 5090_quadcopter_teacher_sac_dynamic
+  entity: weimmmm-university-of-electronic-science-and-technology-
+  mode: online
+  run_id:
+
+evaluation:
+  enabled: False
+  interval: 1000
+  steps: 2200
+  max_wall_time_s: 0
+  eval_at_start: false
