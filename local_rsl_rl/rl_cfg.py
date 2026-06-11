@@ -153,6 +153,12 @@ class RslRlOffPolicyRunnerCfg:
     random_forward_action_std: float = 0.60
     random_lateral_action_std: float = 0.60
     random_vertical_action_std: float = 0.10
+    warmup_action_mode: Literal["random", "target"] = "random"
+    warmup_target_action_scale: float = 0.60
+    warmup_lateral_noise_std: float = 0.15
+    warmup_vertical_gain: float = 0.60
+    warmup_vertical_noise_std: float = 0.03
+    warmup_min_height: float = 0.80
 
 
 @configclass

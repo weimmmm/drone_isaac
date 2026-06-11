@@ -39,8 +39,28 @@ class WandbSummaryWriter(SummaryWriter):
         except KeyError:
             entity = None
 
+        init_kwargs = {
+            "project": project,
+            "entity": entity,
+            "name": run_name,
+            "dir": log_dir,
+        }
+        run_id = os.environ.get("WANDB_RUN_ID")
+        if run_id:
+            init_kwargs["id"] = run_id
+            init_kwargs["resume"] = os.environ.get("WANDB_RESUME", "allow")
+
         # Initialize wandb
-        wandb.init(project=project, entity=entity, name=run_name)
+        wandb.init(**init_kwargs)
+        try:
+            wandb.define_metric("Train/iteration")
+            wandb.define_metric("*", step_metric="Train/iteration")
+        except Exception as err:
+            print(f"[WARN] Failed to define WandB metrics: {err}", flush=True)
+        if wandb.run is not None:
+            print(f"[INFO] WandB run id: {wandb.run.id}", flush=True)
+            if getattr(wandb.run, "url", None):
+                print(f"[INFO] WandB run URL: {wandb.run.url}", flush=True)
 
         # Add log directory to wandb
         wandb.config.update({"log_dir": log_dir})
@@ -49,6 +69,19 @@ class WandbSummaryWriter(SummaryWriter):
             "Train/mean_reward/time": "Train/mean_reward_time",
             "Train/mean_episode_length/time": "Train/mean_episode_length_time",
         }
+
+    def _to_wandb_scalar(self, value):
+        if hasattr(value, "detach"):
+            value = value.detach().cpu()
+            if value.numel() == 1:
+                return value.item()
+            return value
+        if hasattr(value, "item"):
+            try:
+                return value.item()
+            except ValueError:
+                return value
+        return value
 
     def store_config(self, env_cfg, runner_cfg, alg_cfg, policy_cfg):
         wandb.config.update({"runner_cfg": runner_cfg})
@@ -67,10 +100,25 @@ class WandbSummaryWriter(SummaryWriter):
             walltime=walltime,
             new_style=new_style,
         )
-        wandb.log({self._map_path(tag): scalar_value}, step=global_step)
+        wandb.log({self._map_path(tag): self._to_wandb_scalar(scalar_value)}, step=global_step)
+
+    def add_scalars(self, scalars: dict, global_step=None):
+        for tag, scalar_value in scalars.items():
+            super().add_scalar(tag, scalar_value, global_step=global_step)
+        wandb_scalars = {self._map_path(tag): self._to_wandb_scalar(value) for tag, value in scalars.items()}
+        if global_step is not None:
+            global_step = int(global_step)
+            wandb_scalars["Train/iteration"] = global_step
+            wandb.log(wandb_scalars, step=global_step)
+        else:
+            wandb.log(wandb_scalars)
 
     def stop(self):
-        wandb.finish()
+        try:
+            super().flush()
+            super().close()
+        finally:
+            wandb.finish()
 
     def log_config(self, env_cfg, runner_cfg, alg_cfg, policy_cfg):
         self.store_config(env_cfg, runner_cfg, alg_cfg, policy_cfg)
