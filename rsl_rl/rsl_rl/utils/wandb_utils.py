@@ -100,7 +100,13 @@ class WandbSummaryWriter(SummaryWriter):
             walltime=walltime,
             new_style=new_style,
         )
-        wandb.log({self._map_path(tag): self._to_wandb_scalar(scalar_value)}, step=global_step)
+        wandb_scalars = {self._map_path(tag): self._to_wandb_scalar(scalar_value)}
+        if global_step is not None:
+            global_step = int(global_step)
+            wandb_scalars["Train/iteration"] = global_step
+            wandb.log(wandb_scalars, step=global_step)
+        else:
+            wandb.log(wandb_scalars)
 
     def add_scalars(self, scalars: dict, global_step=None):
         for tag, scalar_value in scalars.items():

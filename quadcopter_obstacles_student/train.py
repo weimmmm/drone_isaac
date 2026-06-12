@@ -1,0 +1,278 @@
+from __future__ import annotations
+
+import argparse
+import os
+import pickle
+import re
+import sys
+import faulthandler
+from datetime import datetime
+
+
+TASK_DIR = os.path.abspath(os.path.dirname(__file__))
+ENV_DIR = os.path.abspath(os.path.join(TASK_DIR, ".."))
+ROOT_DIR = os.path.abspath(os.path.join(TASK_DIR, "..", ".."))
+LOCAL_RSL_RL_DIR = os.path.join(ENV_DIR, "rsl_rl")
+
+for path in (ROOT_DIR, ENV_DIR, LOCAL_RSL_RL_DIR):
+    if path not in sys.path:
+        sys.path.insert(0, path)
+
+
+def _ensure_conda_lib_first() -> None:
+    conda_prefix = os.environ.get("CONDA_PREFIX")
+    if not conda_prefix:
+        return
+
+    conda_lib = os.path.join(conda_prefix, "lib")
+    ld_paths = os.environ.get("LD_LIBRARY_PATH", "").split(os.pathsep)
+    if ld_paths and ld_paths[0] == conda_lib:
+        return
+
+    env = os.environ.copy()
+    env["LD_LIBRARY_PATH"] = os.pathsep.join([conda_lib, *[path for path in ld_paths if path]])
+    env["QUADCOPTER_TRAIN_REEXEC"] = "1"
+    os.execvpe(sys.executable, [sys.executable, *sys.argv], env)
+
+
+_ensure_conda_lib_first()
+
+
+from isaaclab.app import AppLauncher
+
+
+parser = argparse.ArgumentParser(description="Train quadcopter obstacles with the vendored rsl_rl library.")
+parser.set_defaults(video= False) 
+parser.add_argument("--video", dest="video", action="store_true")
+parser.add_argument("--no_video", dest="video", action="store_false")
+parser.add_argument("--video_length", type=int, default=250)
+parser.add_argument("--video_interval_iterations", type=int, default=200)
+parser.add_argument("--num_envs", type=int, default=8196)
+parser.add_argument("--task", type=str, default="Isaac-Quadcopter-Obstacles-Student-v0")
+parser.add_argument("--seed", type=int, default=None)
+parser.add_argument("--max_iterations", type=int, default=None)
+parser.add_argument("--resume", action="store_true", default=False)
+parser.add_argument("--load_run", type=str, default=None)
+parser.add_argument("--checkpoint", type=str, default=None)
+parser.add_argument("--experiment_name", type=str, default=None)
+parser.add_argument("--cfg", type=str, default=os.path.join(TASK_DIR, "cfg", "train.yaml"))
+parser.add_argument("--env_cfg_dir", type=str, default=None)
+parser.add_argument("--logger", type=str, choices=["tensorboard", "wandb", "neptune"], default=None)
+parser.add_argument("--wandb_project", type=str, default=None)
+parser.add_argument("--wandb_name", type=str, default=None)
+parser.add_argument("--wandb_entity", type=str, default=None)
+parser.add_argument("--wandb_mode", type=str, default=None)
+parser.add_argument("--wandb_run_id", type=str, default=None)
+parser.add_argument("--debug_hang_trace_s", type=float, default=0.0)
+AppLauncher.add_app_launcher_args(parser)
+args_cli = parser.parse_args()
+
+if args_cli.video:
+    args_cli.enable_cameras = True
+if not args_cli.headless and not args_cli.experience:
+    # Avoid full editor test discovery in the default GUI experience.
+    args_cli.experience = "isaaclab.python.rendering.kit"
+
+app_launcher = AppLauncher(args_cli)
+simulation_app = app_launcher.app
+
+import gymnasium as gym
+import torch
+
+from isaaclab.utils.dict import class_to_dict, print_dict
+from isaaclab.utils.io import dump_yaml
+
+from local_rsl_rl import RslRlVecEnvWrapper
+from rsl_rl.runners import OnPolicyRunner
+
+import quadcopter_obstacles_student  # noqa: F401
+from quadcopter_obstacles_student.config_utils import apply_env_cfg_dir, load_yaml_cfg
+
+
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+torch.backends.cudnn.deterministic = False
+torch.backends.cudnn.benchmark = False
+
+
+def _load_cfg_from_registry(task_name: str, entry_point_key: str):
+    cfg_entry_point = gym.spec(task_name).kwargs.get(entry_point_key)
+    if cfg_entry_point is None:
+        raise ValueError(f"Missing '{entry_point_key}' for task '{task_name}'.")
+
+    if callable(cfg_entry_point):
+        return cfg_entry_point()
+
+    if isinstance(cfg_entry_point, str):
+        module_name, attr_name = cfg_entry_point.split(":")
+        module = __import__(module_name, fromlist=[attr_name])
+        cfg_or_cls = getattr(module, attr_name)
+        return cfg_or_cls() if callable(cfg_or_cls) else cfg_or_cls
+
+    return cfg_entry_point
+
+
+def _find_checkpoint(log_root: str, run_name: str, checkpoint_name: str) -> str:
+    if not os.path.isdir(log_root):
+        raise ValueError(f"Log directory does not exist: {log_root}")
+
+    matched_runs = [entry.path for entry in os.scandir(log_root) if entry.is_dir() and re.match(run_name, entry.name)]
+    if not matched_runs:
+        raise ValueError(f"No runs in '{log_root}' match '{run_name}'.")
+    matched_runs.sort()
+    run_path = matched_runs[-1]
+
+    checkpoints = [name for name in os.listdir(run_path) if re.match(checkpoint_name, name)]
+    if not checkpoints:
+        raise ValueError(f"No checkpoints in '{run_path}' match '{checkpoint_name}'.")
+    checkpoints.sort(key=lambda name: f"{name:0>15}")
+    return os.path.join(run_path, checkpoints[-1])
+
+
+def _apply_wandb_cfg(agent_cfg, wandb_cfg: dict) -> None:
+    if not wandb_cfg:
+        return
+
+    project = wandb_cfg.get("project")
+    name = wandb_cfg.get("name")
+    entity = wandb_cfg.get("entity")
+    mode = wandb_cfg.get("mode")
+    run_id = wandb_cfg.get("run_id")
+
+    agent_cfg.logger = "wandb"
+    if project:
+        agent_cfg.wandb_project = project
+    if name:
+        agent_cfg.run_name = name
+    if entity:
+        os.environ["WANDB_USERNAME"] = str(entity)
+    if mode:
+        # YAML is the default source of truth; explicit CLI flags are applied later.
+        os.environ["WANDB_MODE"] = str(mode)
+    if run_id:
+        os.environ["WANDB_RUN_ID"] = str(run_id)
+        os.environ.setdefault("WANDB_RESUME", "allow")
+
+
+def main():
+    if args_cli.debug_hang_trace_s > 0.0:
+        faulthandler.enable()
+        faulthandler.dump_traceback_later(args_cli.debug_hang_trace_s, repeat=True)
+
+    yaml_cfg = load_yaml_cfg(args_cli.cfg)
+
+    env_cfg = _load_cfg_from_registry(args_cli.task, "env_cfg_entry_point")
+    agent_cfg = _load_cfg_from_registry(args_cli.task, "rsl_rl_cfg_entry_point")
+    env_cfg_dir = args_cli.env_cfg_dir or os.path.dirname(args_cli.cfg)
+    env_cfg_paths = apply_env_cfg_dir(env_cfg, env_cfg_dir)
+    _apply_wandb_cfg(agent_cfg, yaml_cfg.get("wandb", {}))
+
+    if args_cli.num_envs is not None:
+        env_cfg.scene.num_envs = args_cli.num_envs
+    if args_cli.max_iterations is not None:
+        agent_cfg.max_iterations = args_cli.max_iterations
+    if args_cli.seed is not None:
+        agent_cfg.seed = args_cli.seed
+
+    env_cfg.seed = agent_cfg.seed
+    env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
+
+    if args_cli.experiment_name:
+        agent_cfg.experiment_name = args_cli.experiment_name
+    if args_cli.logger:
+        agent_cfg.logger = args_cli.logger
+    if args_cli.wandb_project:
+        agent_cfg.wandb_project = args_cli.wandb_project
+    if args_cli.wandb_name:
+        agent_cfg.run_name = args_cli.wandb_name
+    if args_cli.wandb_entity:
+        os.environ["WANDB_USERNAME"] = args_cli.wandb_entity
+    if args_cli.wandb_mode:
+        os.environ["WANDB_MODE"] = args_cli.wandb_mode
+    if args_cli.wandb_run_id:
+        os.environ["WANDB_RUN_ID"] = args_cli.wandb_run_id
+        os.environ.setdefault("WANDB_RESUME", "allow")
+    if args_cli.resume:
+        agent_cfg.resume = True
+    if args_cli.load_run:
+        agent_cfg.load_run = args_cli.load_run
+    if args_cli.checkpoint:
+        agent_cfg.load_checkpoint = args_cli.checkpoint
+
+    log_root_path = os.path.abspath(os.path.join(ROOT_DIR, "logs", "rsl_rl", agent_cfg.experiment_name))
+    print(f"[INFO] Logging experiment in directory: {log_root_path}")
+    log_dir = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    print(f"Exact experiment name requested from command line: {log_dir}")
+    if agent_cfg.run_name:
+        log_dir += f"_{agent_cfg.run_name}"
+    log_dir = os.path.join(log_root_path, log_dir)
+    os.makedirs(os.path.join(log_dir, "params"), exist_ok=True)
+    print(f"[INFO] Logger: {agent_cfg.logger}")
+    if args_cli.cfg:
+        print(f"[INFO] Config file: {args_cli.cfg}")
+    if env_cfg_paths:
+        print("[INFO] Environment config files:")
+        for path in env_cfg_paths:
+            print(f"  - {path}")
+    if agent_cfg.logger == "wandb":
+        print(f"[INFO] WandB project: {agent_cfg.wandb_project}")
+        if agent_cfg.run_name:
+            print(f"[INFO] WandB run name: {agent_cfg.run_name}")
+        if os.environ.get("WANDB_USERNAME"):
+            print(f"[INFO] WandB entity: {os.environ['WANDB_USERNAME']}")
+        if os.environ.get("WANDB_MODE"):
+            print(f"[INFO] WandB mode: {os.environ['WANDB_MODE']}")
+        if os.environ.get("WANDB_RUN_ID"):
+            print(f"[INFO] WandB run id: {os.environ['WANDB_RUN_ID']}")
+
+    env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
+
+    if agent_cfg.resume:
+        resume_path = _find_checkpoint(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
+        print(f"[INFO] Loading model checkpoint from: {resume_path}")
+    else:
+        resume_path = None
+
+    if args_cli.video:
+        video_interval_steps = args_cli.video_interval_iterations * agent_cfg.num_steps_per_env
+        video_kwargs = {
+            "video_folder": os.path.join(log_dir, "videos", "train"),
+            "step_trigger": lambda step: step % video_interval_steps == 0,
+            "video_length": args_cli.video_length,
+            "disable_logger": True,
+        }
+        print("[INFO] Recording videos during training.")
+        print(f"[INFO] Saving one training video every {args_cli.video_interval_iterations} learning iterations.")
+        print_dict(video_kwargs, nesting=4)
+        env = gym.wrappers.RecordVideo(env, **video_kwargs)
+
+    env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
+    runner_cfg = class_to_dict(agent_cfg)
+    runner_cfg["evaluation"] = yaml_cfg.get("evaluation", {})
+
+    runner = OnPolicyRunner(env, runner_cfg, log_dir=log_dir, device=agent_cfg.device)
+    runner.add_git_repo_to_log(__file__)
+
+    if resume_path:
+        runner.load(resume_path)
+
+    dump_yaml(os.path.join(log_dir, "params", "env.yaml"), env_cfg)
+    dump_yaml(os.path.join(log_dir, "params", "agent.yaml"), agent_cfg)
+    with open(os.path.join(log_dir, "params", "env.pkl"), "wb") as file:
+        pickle.dump(env_cfg, file)
+    with open(os.path.join(log_dir, "params", "agent.pkl"), "wb") as file:
+        pickle.dump(agent_cfg, file)
+
+    try:
+        runner.learn(num_learning_iterations=agent_cfg.max_iterations, init_at_random_ep_len=True)
+    finally:
+        if args_cli.debug_hang_trace_s > 0.0:
+            faulthandler.cancel_dump_traceback_later()
+    env.close()
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    finally:
+        simulation_app.close()

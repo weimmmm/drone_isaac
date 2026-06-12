@@ -1,0 +1,12 @@
+vel_tracking_reward_scale: 0.5
+vel_tracking_exp_scale: 4.0
+ang_vel_reward_scale: -0.01
+distance_to_target_reward_scale: 12.0
+target_velocity_reward_scale: 1.5
+target_reached_bonus: 100.0
+obstacle_proximity_reward_scale: -16.0
+progress_reward_scale: 8.0
+static_collision_penalty: -80.0
+dynamic_collision_penalty: -80.0
+wall_collision_penalty: -80.0
+height_violation_penalty: -40.0

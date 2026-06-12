@@ -44,6 +44,16 @@ class RslRlPpoActorCriticCfg:
     # Backward-compatible flat fields used by older tasks/configs.
     actor_hidden_dims: list[int] | None = None
     critic_hidden_dims: list[int] | None = None
+    static_encoder_hidden_dims: list[int] | None = None
+    dynamic_encoder_hidden_dims: list[int] | None = None
+    other_encoder_hidden_dims: list[int] | None = None
+    static_latent_dim: int | None = None
+    dynamic_latent_dim: int | None = None
+    other_latent_dim: int | None = None
+    static_obs_start_idx: int | None = None
+    static_obs_dim: int | None = None
+    dynamic_obs_start_idx: int | None = None
+    dynamic_obs_dim: int | None = None
     state_hidden_dims: list[int] | None = None
     cnn_channels: list[int] | None = None
     cnn_kernel_sizes: list[int] | None = None

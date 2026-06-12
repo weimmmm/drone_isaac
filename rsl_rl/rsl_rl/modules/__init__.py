@@ -8,6 +8,7 @@
 from .actor_critic import ActorCritic
 from .actor_critic_cnn import ActorCriticCnn
 from .actor_critic_cnn_asymmetric import ActorCriticCnnAsymmetric
+from .actor_critic_multi_head_obs import ActorCriticMultiHeadObs
 from .actor_critic_vit_asymmetric import ActorCriticVitAsymmetric
 from .actor_critic_vit_recurrent_asymmetric import ActorCriticVitRecurrentAsymmetric
 from .actor_critic_cnn_recurrent import ActorCriticCnnRecurrent
@@ -23,6 +24,7 @@ __all__ = [
     "ActorCritic",
     "ActorCriticCnn",
     "ActorCriticCnnAsymmetric",
+    "ActorCriticMultiHeadObs",
     "ActorCriticVitAsymmetric",
     "ActorCriticVitRecurrentAsymmetric",
     "ActorCriticCnnRecurrent",

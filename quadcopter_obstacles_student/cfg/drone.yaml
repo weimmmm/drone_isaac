@@ -1,0 +1,13 @@
+spawn_edge_distance: 24.0
+target_spawn_range: 24.0
+spawn_min_height: 0.5
+spawn_max_height: 2.5
+target_min_height: 0.5
+target_max_height: 2.5
+flight_min_height: 0.1
+flight_max_height: 4.0
+target_reach_threshold: 0.5
+drone_spawn_min_separation: 1.0
+
+cmd_body_vel_xy_max: 1.0
+cmd_vel_z_max: 1.0
