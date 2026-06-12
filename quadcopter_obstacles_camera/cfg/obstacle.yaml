@@ -1,0 +1,11 @@
+num_obstacles: 350
+num_closest_obstacles: 8
+obstacle_height: 4.0
+obstacle_radius: 0.15
+obstacle_spawn_range: 20.0
+obstacle_safe_zone: 1.0
+obstacle_min_separation: 0.6
+obstacle_detection_range: 6.0
+obstacle_proximity_trigger_distance: 3.0
+obstacle_collision_margin: 0.10
+target_obstacle_clearance: 2.0

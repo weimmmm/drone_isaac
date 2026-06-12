@@ -1,0 +1,11 @@
+num_dynamic_obstacles: 60
+num_closest_dynamic_obstacles: 5
+dynamic_obstacle_max_width: 1.0
+dynamic_obstacle_3d_height: 1.0
+dynamic_obstacle_2d_height: 5.0
+dynamic_obstacle_vel_range: [0.5, 1.5]
+dynamic_obstacle_local_range: [5.0, 5.0, 4.5]
+dynamic_obstacle_goal_threshold: 0.5
+dynamic_obstacle_velocity_resample_s: 2.0
+dynamic_obstacle_collision_margin: 0.3
+dynamic_obstacle_visual_update_interval: 1
