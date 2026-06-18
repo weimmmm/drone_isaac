@@ -29,6 +29,21 @@ checkpoints/
 wandb/
 **/wandb/
 
+# Collected datasets and generated samples
+**/date_collect/data/
+**/date_collect/datasets/
+**/dataset/
+**/datasets/
+**/data/images/
+**/data/depth/
+**/data/rgb/
+**/data/*.csv
+**/data/*.png
+**/data/*.jpg
+**/data/*.jpeg
+**/data/*.mp4
+**/data/*.avi
+
 # TensorBoard / training metadata
 events.out.tfevents*
 *.tfevents*
@@ -42,6 +57,8 @@ events.out.tfevents*
 *.onnx
 *.npz
 *.npy
+*.bag
+*.db3
 
 # Archives and local copies
 *.zip
