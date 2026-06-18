@@ -80,6 +80,9 @@ class QuadcopterObstaclesEnvCfg:
 
     cmd_body_vel_xy_max: float = 1.0
     cmd_vel_z_max: float = 1.0
+    cmd_vel_smoothing_alpha: float = 0.35
+    cmd_body_vel_xy_rate_limit: float = 4.0
+    cmd_vel_z_rate_limit: float = 4.0
 
     vel_tracking_reward_scale: float = 0.5
     vel_tracking_exp_scale: float = 4.0
@@ -129,6 +132,17 @@ class QuadcopterObstaclesEnv(gym.Env):
         self.device = torch.device(self.cfg.device)
         self.num_envs = self.cfg.scene.num_envs
         self.step_dt = self.cfg.physics_dt * self.cfg.decimation
+        cmd_xy_delta = (
+            float(self.cfg.cmd_body_vel_xy_rate_limit) * self.step_dt
+            if float(self.cfg.cmd_body_vel_xy_rate_limit) > 0.0
+            else float("inf")
+        )
+        cmd_z_delta = (
+            float(self.cfg.cmd_vel_z_rate_limit) * self.step_dt
+            if float(self.cfg.cmd_vel_z_rate_limit) > 0.0
+            else float("inf")
+        )
+        self._cmd_vel_max_delta = torch.tensor([cmd_xy_delta, cmd_xy_delta, cmd_z_delta], device=self.device)
         self.max_episode_length = int(round(self.cfg.episode_length_s / self.step_dt))
         self.max_episode_length_s = self.max_episode_length * self.step_dt
         self.num_states = 0
@@ -161,6 +175,7 @@ class QuadcopterObstaclesEnv(gym.Env):
         self._robot_mass = 0.0
 
         self._actions = torch.zeros((self.num_envs, self.cfg.action_space), device=self.device)
+        self._target_cmd_vel_b = torch.zeros((self.num_envs, 3), device=self.device)
         self._cmd_vel_b = torch.zeros((self.num_envs, 3), device=self.device)
         self._thrust = torch.zeros((self.num_envs, 1, 3), device=self.device)
         self._moment = torch.zeros((self.num_envs, 1, 3), device=self.device)
@@ -727,6 +742,7 @@ class QuadcopterObstaclesEnv(gym.Env):
         self._rew_buf[env_ids] = 0.0
         self.episode_length_buf[env_ids] = 0
         self._cmd_vel_b[env_ids] = 0.0
+        self._target_cmd_vel_b[env_ids] = 0.0
         self._actions[env_ids] = 0.0
 
         controller_state = {
@@ -749,14 +765,31 @@ class QuadcopterObstaclesEnv(gym.Env):
             self._episode_sums[key][env_ids] = 0.0
         return self._get_observations()
 
+    def _update_command_from_actions(self, actions: torch.Tensor) -> None:
+        self._target_cmd_vel_b[:, :2] = actions[:, :2] * self.cfg.cmd_body_vel_xy_max
+        self._target_cmd_vel_b[:, 2] = actions[:, 2] * self.cfg.cmd_vel_z_max
+
+        alpha = max(0.0, min(float(self.cfg.cmd_vel_smoothing_alpha), 1.0))
+        if alpha >= 1.0:
+            next_cmd = self._target_cmd_vel_b
+        else:
+            next_cmd = self._cmd_vel_b + alpha * (self._target_cmd_vel_b - self._cmd_vel_b)
+
+        xy_rate_limit = float(self.cfg.cmd_body_vel_xy_rate_limit)
+        z_rate_limit = float(self.cfg.cmd_vel_z_rate_limit)
+        if xy_rate_limit > 0.0 or z_rate_limit > 0.0:
+            delta = (next_cmd - self._cmd_vel_b).clamp(-self._cmd_vel_max_delta, self._cmd_vel_max_delta)
+            next_cmd = self._cmd_vel_b + delta
+
+        self._cmd_vel_b[:] = next_cmd
+
     def step(self, actions: torch.Tensor):
         if not self._built:
             raise RuntimeError("Call reset() before step().")
 
         actions = actions.to(self.device).clamp(-1.0, 1.0)
         self._actions[:] = actions
-        self._cmd_vel_b[:, :2] = actions[:, :2] * self.cfg.cmd_body_vel_xy_max
-        self._cmd_vel_b[:, 2] = actions[:, 2] * self.cfg.cmd_vel_z_max
+        self._update_command_from_actions(actions)
 
         root_quat_w = self.robot.data.root_quat_w
         root_ang_vel_b = quat_apply_inverse(root_quat_w, self.robot.data.root_ang_vel_w)
