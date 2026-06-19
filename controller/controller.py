@@ -93,6 +93,8 @@ class CrazyflieController:
         self._outer_roll_cmd = torch.zeros(num_envs, device=device)
         self._outer_pitch_cmd = torch.zeros(num_envs, device=device)
         self._outer_thrust_cmd = torch.zeros(num_envs, device=device)
+        self._smoothed_roll_des = torch.zeros(num_envs, device=device)
+        self._smoothed_pitch_des = torch.zeros(num_envs, device=device)
 
         # Accumulator to trigger low-rate updates (start "full" so first compute updates immediately)
         self._outer_time_acc = self.position_dt
@@ -141,6 +143,12 @@ class CrazyflieController:
             self._outer_roll_cmd.zero_()
             self._outer_pitch_cmd.zero_()
             self._outer_thrust_cmd.zero_()
+            if attitude is not None:
+                self._smoothed_roll_des = attitude[:, 0].clone()
+                self._smoothed_pitch_des = attitude[:, 1].clone()
+            else:
+                self._smoothed_roll_des.zero_()
+                self._smoothed_pitch_des.zero_()
             self._outer_time_acc = self.position_dt
         else:
             self.control_mode[env_ids] = ControlMode.ATTITUDE
@@ -157,6 +165,12 @@ class CrazyflieController:
             self._outer_roll_cmd[env_ids] = 0.0
             self._outer_pitch_cmd[env_ids] = 0.0
             self._outer_thrust_cmd[env_ids] = 0.0
+            if attitude is not None:
+                self._smoothed_roll_des[env_ids] = attitude[env_ids, 0]
+                self._smoothed_pitch_des[env_ids] = attitude[env_ids, 1]
+            else:
+                self._smoothed_roll_des[env_ids] = 0.0
+                self._smoothed_pitch_des[env_ids] = 0.0
 
     def set_attitude_setpoint(
         self,
@@ -305,6 +319,33 @@ class CrazyflieController:
         """Wrap angle to [-180, 180] degrees."""
         return ((angle + 180.0) % 360.0) - 180.0
 
+    def _smooth_roll_pitch_setpoints(
+        self,
+        roll_des: torch.Tensor,
+        pitch_des: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        alpha = max(0.0, min(float(config.ATTITUDE_RP_SETPOINT_SMOOTHING_ALPHA), 1.0))
+        if alpha >= 1.0:
+            next_roll = roll_des
+            next_pitch = pitch_des
+        else:
+            next_roll = self._smoothed_roll_des + alpha * (roll_des - self._smoothed_roll_des)
+            next_pitch = self._smoothed_pitch_des + alpha * (pitch_des - self._smoothed_pitch_des)
+
+        rate_limit = float(config.ATTITUDE_RP_SETPOINT_RATE_LIMIT_DPS)
+        if rate_limit > 0.0:
+            max_delta = rate_limit * self.attitude_dt
+            next_roll = self._smoothed_roll_des + (next_roll - self._smoothed_roll_des).clamp(
+                -max_delta, max_delta
+            )
+            next_pitch = self._smoothed_pitch_des + (next_pitch - self._smoothed_pitch_des).clamp(
+                -max_delta, max_delta
+            )
+
+        self._smoothed_roll_des[:] = next_roll
+        self._smoothed_pitch_des[:] = next_pitch
+        return next_roll, next_pitch
+
     def compute(
         self,
         state: Dict[str, torch.Tensor],
@@ -424,6 +465,8 @@ class CrazyflieController:
             # Reset controllers for zero thrust environments
             self.attitude_controller.reset(attitude, torch.where(zero_thrust)[0])
             self.yaw_setpoint = torch.where(zero_thrust, yaw, self.yaw_setpoint)
+
+        roll_des, pitch_des = self._smooth_roll_pitch_setpoints(roll_des, pitch_des)
 
         # --- Attitude PID ---
         attitude_desired = torch.stack([roll_des, pitch_des, yaw_des], dim=1)

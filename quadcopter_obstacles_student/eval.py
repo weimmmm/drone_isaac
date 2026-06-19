@@ -9,9 +9,8 @@ TASK_DIR = os.path.abspath(os.path.dirname(__file__))
 ENV_DIR = os.path.abspath(os.path.join(TASK_DIR, ".."))
 ROOT_DIR = os.path.abspath(os.path.join(TASK_DIR, "..", ".."))
 LOCAL_RSL_RL_DIR = os.path.join(ENV_DIR, "rsl_rl")
-DEFAULT_MODEL_PATH = (
-    "/home/wei/End_to_end/logs/rsl_rl/quadcopter_obstacles_student/model_latest.pt"
-)
+DEFAULT_MODEL_PATH = "/home/wei/End_to_end/logs/rsl_rl/quadcopter_obstacles_student/2026-06-18_17-17-12_5090_quadcopter_obstacles_student_safe_multihead/model_5300.pt"
+DEFAULT_METRICS_OUT = "/home/wei/End_to_end/logs/rsl_rl/quadcopter_obstacles_student/eval_student_metrics.txt"
 
 for path in (ROOT_DIR, ENV_DIR, LOCAL_RSL_RL_DIR, TASK_DIR):
     if path not in sys.path:
@@ -23,10 +22,13 @@ def main():
 
     parser = argparse.ArgumentParser(description="Evaluate a trained student quadcopter obstacles policy.")
     parser.add_argument("--task", type=str, default="Isaac-Quadcopter-Obstacles-Student-v0")
-    parser.add_argument("--num_envs", type=int, default=128)
+    parser.add_argument("--num_envs", type=int, default=8)
     parser.add_argument("--steps", type=int, default=None)
     parser.add_argument("--model", type=str, default=DEFAULT_MODEL_PATH)
-    parser.add_argument("--metrics_out", type=str, default="/home/wei/End_to_end/logs/rsl_rl/quadcopter_obstacles_student/eval_student_metrics.txt")
+    parser.add_argument("--metrics_out", type=str, default=DEFAULT_METRICS_OUT)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--diagnostic_interval", type=int, default=250)
+    parser.add_argument("--diagnostic_env_id", type=int, default=0)
     parser.add_argument("--env_cfg_dir", type=str, default=os.path.join(TASK_DIR, "cfg"))
     AppLauncher.add_app_launcher_args(parser)
     args = parser.parse_args()
@@ -42,7 +44,7 @@ def main():
 
     app_launcher = AppLauncher(args)
     simulation_app = app_launcher.app
-
+     
     try:
         log("simulation_app_started")
 
@@ -56,6 +58,8 @@ def main():
 
         import quadcopter_obstacles_student  # noqa: F401
         from quadcopter_obstacles_student.config_utils import apply_env_cfg_dir
+        from quadcopter_obstacles_student.quadcopter_obstacles_env import _quat_to_euler_deg
+        from isaaclab.utils.math import quat_apply_inverse
         log("imports_after_app_ok")
 
         def _load_cfg_from_registry(task_name: str, entry_point_key: str):
@@ -82,12 +86,15 @@ def main():
         env_cfg.scene.num_envs = args.num_envs
         env_cfg.debug_vis = False
         env_cfg.sim.device = args.device
+        env_cfg.seed = args.seed
         agent_cfg.device = args.device
 
         env = gym.make(args.task, cfg=env_cfg, render_mode=None)
+        env.unwrapped.seed(args.seed)
         env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
         log("env_created")
         env.unwrapped.eval()
+        env.seed(args.seed)
         obs = env.reset()
         env.unwrapped.episode_length_buf.zero_()
         log("env_reset_navrl_eval")
@@ -115,6 +122,56 @@ def main():
         speed_xy_sum = 0.0
         action_abs_sum = torch.zeros(env.num_actions, device=args.device)
         action_sq_sum = torch.zeros(env.num_actions, device=args.device)
+        prev_actions = None
+        prev_target_cmd = None
+        prev_cmd = None
+        prev_cmd_yaw = None
+        prev_vel_cmd_frame = None
+        prev_rpy = None
+        prev_outer_rp = None
+        prev_smoothed_rp = None
+        diag_sample_count = 0
+        interval_diag_samples = 0
+        action_delta_abs_sum = torch.zeros(env.num_actions, device=args.device)
+        action_delta_sq_sum = torch.zeros(env.num_actions, device=args.device)
+        action_jump_count = torch.zeros(env.num_actions, device=args.device)
+        action_saturation_count = torch.zeros(env.num_actions, device=args.device)
+        target_cmd_delta_abs_sum = torch.zeros(3, device=args.device)
+        cmd_delta_abs_sum = torch.zeros(3, device=args.device)
+        cmd_yaw_abs_sum = 0.0
+        cmd_yaw_delta_abs_sum = 0.0
+        yaw_error_abs_sum = 0.0
+        vel_delta_abs_sum = torch.zeros(3, device=args.device)
+        rpy_abs_sum = torch.zeros(3, device=args.device)
+        rpy_delta_abs_sum = torch.zeros(3, device=args.device)
+        outer_rp_abs_sum = torch.zeros(2, device=args.device)
+        outer_rp_delta_abs_sum = torch.zeros(2, device=args.device)
+        smoothed_rp_abs_sum = torch.zeros(2, device=args.device)
+        smoothed_rp_delta_abs_sum = torch.zeros(2, device=args.device)
+        cmd_tracking_error_sum = 0.0
+        vel_tracking_error_sum = 0.0
+        speed_delta_sum = 0.0
+        rate_des_abs_sum = torch.zeros(3, device=args.device)
+        rate_actual_abs_sum = torch.zeros(3, device=args.device)
+        thrust_pwm_sum = 0.0
+        thrust_pwm_delta_sum = 0.0
+        motor_pwm_range_sum = 0.0
+        overspeed_count = 0.0
+        prev_thrust_pwm = None
+        interval_action_delta_abs_sum = torch.zeros(env.num_actions, device=args.device)
+        interval_action_jump_count = torch.zeros(env.num_actions, device=args.device)
+        interval_action_saturation_count = torch.zeros(env.num_actions, device=args.device)
+        interval_cmd_delta_abs_sum = torch.zeros(3, device=args.device)
+        interval_cmd_yaw_delta_abs_sum = 0.0
+        interval_yaw_error_abs_sum = 0.0
+        interval_vel_delta_abs_sum = torch.zeros(3, device=args.device)
+        interval_rpy_delta_abs_sum = torch.zeros(3, device=args.device)
+        interval_outer_rp_abs_sum = torch.zeros(2, device=args.device)
+        interval_outer_rp_delta_abs_sum = torch.zeros(2, device=args.device)
+        interval_smoothed_rp_abs_sum = torch.zeros(2, device=args.device)
+        interval_smoothed_rp_delta_abs_sum = torch.zeros(2, device=args.device)
+        interval_vel_tracking_error_sum = 0.0
+        interval_overspeed_count = 0.0
         final_target_distance = None
         final_obstacle_distance = None
         final_dynamic_obstacle_distance = None
@@ -124,6 +181,7 @@ def main():
             for step in range(eval_steps):
                 actions = policy(obs)
                 obs, rew, dones, extras = env.step(actions)
+                unwrapped = env.unwrapped
 
                 rew_flat = rew.reshape(-1)
                 reward_sum += rew_flat.sum().item()
@@ -157,29 +215,158 @@ def main():
                     )[new_done]
                     done_seen |= new_done
 
-                lin_vel_w = env.unwrapped.robot.data.root_lin_vel_w
+                lin_vel_w = unwrapped.robot.data.root_lin_vel_w
                 speed_sum += torch.linalg.norm(lin_vel_w, dim=1).sum().item()
                 speed_xy_sum += torch.linalg.norm(lin_vel_w[:, :2], dim=1).sum().item()
 
                 action_abs_sum += actions.abs().sum(dim=0)
                 action_sq_sum += torch.square(actions).sum(dim=0)
+                action_saturation_count += (actions.abs() > 0.95).float().sum(dim=0)
 
-                target_world = env.unwrapped._target_positions_w
-                robot_pos_w = env.unwrapped.robot.data.root_pos_w
+                root_quat_w = unwrapped.robot.data.root_quat_w
+                rpy = _quat_to_euler_deg(root_quat_w)
+                lin_vel_b = quat_apply_inverse(root_quat_w, lin_vel_w)
+                vel_cmd_frame = torch.stack([lin_vel_b[:, 0], lin_vel_b[:, 1], lin_vel_w[:, 2]], dim=1)
+                target_cmd = getattr(unwrapped, "_target_cmd_vel_b", unwrapped._cmd_vel_b)
+                cmd = unwrapped._cmd_vel_b
+                cmd_yaw = getattr(unwrapped, "_cmd_yaw_deg", torch.zeros(args.num_envs, device=args.device))
+                target_cmd_yaw = getattr(unwrapped, "_target_cmd_yaw_deg", cmd_yaw)
+                yaw_error_deg = extras.get("yaw_error_deg", torch.zeros(args.num_envs, device=args.device))
+                controller = unwrapped._controller
+                outer_rp = torch.stack([controller._outer_roll_cmd, controller._outer_pitch_cmd], dim=1)
+                smoothed_rp = torch.stack([controller._smoothed_roll_des, controller._smoothed_pitch_des], dim=1)
+                thrust_pwm = controller._outer_thrust_cmd
+                motor_pwm = controller.power_distribution.motor_thrust
+
+                diag_sample_count += args.num_envs
+                interval_diag_samples += args.num_envs
+                speed_xy_now = torch.linalg.norm(lin_vel_w[:, :2], dim=1)
+                overspeed_count += (speed_xy_now > float(unwrapped.cfg.cmd_body_vel_xy_max)).float().sum().item()
+                interval_overspeed_count += (speed_xy_now > float(unwrapped.cfg.cmd_body_vel_xy_max)).float().sum().item()
+                rpy_abs_sum += rpy.abs().sum(dim=0)
+                outer_rp_abs_sum += outer_rp.abs().sum(dim=0)
+                smoothed_rp_abs_sum += smoothed_rp.abs().sum(dim=0)
+                interval_outer_rp_abs_sum += outer_rp.abs().sum(dim=0)
+                interval_smoothed_rp_abs_sum += smoothed_rp.abs().sum(dim=0)
+                cmd_tracking_error_sum += torch.linalg.norm(target_cmd - cmd, dim=1).sum().item()
+                cmd_yaw_abs_sum += cmd_yaw.abs().sum().item()
+                yaw_error_abs_sum += yaw_error_deg.abs().sum().item()
+                interval_yaw_error_abs_sum += yaw_error_deg.abs().sum().item()
+                vel_tracking_error_sum += torch.linalg.norm(cmd - vel_cmd_frame, dim=1).sum().item()
+                interval_vel_tracking_error_sum += torch.linalg.norm(cmd - vel_cmd_frame, dim=1).sum().item()
+                thrust_pwm_sum += thrust_pwm.abs().sum().item()
+                motor_pwm_range_sum += (motor_pwm.max(dim=1).values - motor_pwm.min(dim=1).values).sum().item()
+                rate_desired = getattr(controller.attitude_controller, "last_rate_desired", None)
+                rate_actual = getattr(controller.attitude_controller, "last_rate_actual", None)
+                if rate_desired is not None:
+                    rate_des_abs_sum += rate_desired.abs().sum(dim=0)
+                if rate_actual is not None:
+                    rate_actual_abs_sum += rate_actual.abs().sum(dim=0)
+
+                if prev_actions is not None:
+                    action_delta = actions - prev_actions
+                    target_cmd_delta = target_cmd - prev_target_cmd
+                    cmd_delta = cmd - prev_cmd
+                    cmd_yaw_delta = ((cmd_yaw - prev_cmd_yaw + 180.0) % 360.0) - 180.0
+                    vel_delta = vel_cmd_frame - prev_vel_cmd_frame
+                    rpy_delta = rpy - prev_rpy
+                    outer_rp_delta = outer_rp - prev_outer_rp
+                    smoothed_rp_delta = smoothed_rp - prev_smoothed_rp
+                    action_delta_abs_sum += action_delta.abs().sum(dim=0)
+                    action_delta_sq_sum += torch.square(action_delta).sum(dim=0)
+                    action_jump_count += (action_delta.abs() > 0.5).float().sum(dim=0)
+                    interval_action_delta_abs_sum += action_delta.abs().sum(dim=0)
+                    interval_action_jump_count += (action_delta.abs() > 0.5).float().sum(dim=0)
+                    interval_action_saturation_count += (actions.abs() > 0.95).float().sum(dim=0)
+                    target_cmd_delta_abs_sum += target_cmd_delta.abs().sum(dim=0)
+                    cmd_delta_abs_sum += cmd_delta.abs().sum(dim=0)
+                    cmd_yaw_delta_abs_sum += cmd_yaw_delta.abs().sum().item()
+                    vel_delta_abs_sum += vel_delta.abs().sum(dim=0)
+                    rpy_delta_abs_sum += rpy_delta.abs().sum(dim=0)
+                    outer_rp_delta_abs_sum += outer_rp_delta.abs().sum(dim=0)
+                    smoothed_rp_delta_abs_sum += smoothed_rp_delta.abs().sum(dim=0)
+                    interval_cmd_delta_abs_sum += cmd_delta.abs().sum(dim=0)
+                    interval_cmd_yaw_delta_abs_sum += cmd_yaw_delta.abs().sum().item()
+                    interval_vel_delta_abs_sum += vel_delta.abs().sum(dim=0)
+                    interval_rpy_delta_abs_sum += rpy_delta.abs().sum(dim=0)
+                    interval_outer_rp_delta_abs_sum += outer_rp_delta.abs().sum(dim=0)
+                    interval_smoothed_rp_delta_abs_sum += smoothed_rp_delta.abs().sum(dim=0)
+                    speed_delta_sum += torch.linalg.norm(vel_delta, dim=1).sum().item()
+                    thrust_pwm_delta_sum += (thrust_pwm - prev_thrust_pwm).abs().sum().item()
+
+                prev_actions = actions.detach().clone()
+                prev_target_cmd = target_cmd.detach().clone()
+                prev_cmd = cmd.detach().clone()
+                prev_cmd_yaw = cmd_yaw.detach().clone()
+                prev_vel_cmd_frame = vel_cmd_frame.detach().clone()
+                prev_rpy = rpy.detach().clone()
+                prev_outer_rp = outer_rp.detach().clone()
+                prev_smoothed_rp = smoothed_rp.detach().clone()
+                prev_thrust_pwm = thrust_pwm.detach().clone()
+
+                target_world = unwrapped._target_positions_w
+                robot_pos_w = unwrapped.robot.data.root_pos_w
                 final_target_distance = torch.linalg.norm(target_world - robot_pos_w, dim=1)
-                final_obstacle_distance = env.unwrapped._compute_closest_obstacle_signed_distance(robot_pos_w)
+                final_obstacle_distance = unwrapped._compute_closest_obstacle_signed_distance(robot_pos_w)
                 if "closest_dynamic_obstacle_distance" in extras:
                     final_dynamic_obstacle_distance = extras["closest_dynamic_obstacle_distance"]
-                final_wall_distance = env.unwrapped._compute_wall_signed_distance(robot_pos_w)
+                final_wall_distance = unwrapped._compute_wall_signed_distance(robot_pos_w)
 
-                if (step + 1) % 250 == 0:
+                if args.diagnostic_interval > 0 and (step + 1) % args.diagnostic_interval == 0:
                     mean_reward = reward_sum / ((step + 1) * args.num_envs)
                     done_count = int(done_seen.sum().item())
+                    env_id = max(0, min(int(args.diagnostic_env_id), args.num_envs - 1))
                     log(
                         f"[eval] step={step + 1} mean_step_reward={mean_reward:.4f} "
                         f"episodes_done={done_count} success={int(first_success.sum().item())} "
                         f"died={int(first_died.sum().item())} timeout={int(first_timeout.sum().item())}"
                     )
+                    log(
+                        f"[diag/env{env_id}] action={actions[env_id].detach().cpu().tolist()} "
+                        f"target_cmd={target_cmd[env_id].detach().cpu().tolist()} "
+                        f"cmd={cmd[env_id].detach().cpu().tolist()} "
+                        f"target_cmd_yaw={float(target_cmd_yaw[env_id].item()):.2f} "
+                        f"cmd_yaw={float(cmd_yaw[env_id].item()):.2f} "
+                        f"yaw_error={float(yaw_error_deg[env_id].item()):.2f} "
+                        f"vel_cmd_frame={vel_cmd_frame[env_id].detach().cpu().tolist()} "
+                        f"rpy_deg={rpy[env_id].detach().cpu().tolist()} "
+                        f"outer_rp={outer_rp[env_id].detach().cpu().tolist()} "
+                        f"smoothed_rp={smoothed_rp[env_id].detach().cpu().tolist()} "
+                        f"thrust_pwm={float(thrust_pwm[env_id].item()):.1f}"
+                    )
+                    interval_delta_samples = max(interval_diag_samples - args.num_envs, 1)
+                    log(
+                        "[diag/interval] "
+                        f"action_delta_abs_mean={(interval_action_delta_abs_sum / interval_delta_samples).detach().cpu().tolist()} "
+                        f"action_jump_rate={(interval_action_jump_count / interval_delta_samples).detach().cpu().tolist()} "
+                        f"action_saturation_rate={(interval_action_saturation_count / max(interval_diag_samples, 1)).detach().cpu().tolist()} "
+                        f"cmd_delta_abs_mean={(interval_cmd_delta_abs_sum / interval_delta_samples).detach().cpu().tolist()} "
+                        f"cmd_yaw_delta_abs_mean={interval_cmd_yaw_delta_abs_sum / interval_delta_samples:.6f} "
+                        f"yaw_error_abs_mean_deg={interval_yaw_error_abs_sum / max(interval_diag_samples, 1):.6f} "
+                        f"vel_delta_abs_mean={(interval_vel_delta_abs_sum / interval_delta_samples).detach().cpu().tolist()} "
+                        f"rpy_delta_abs_mean_deg={(interval_rpy_delta_abs_sum / interval_delta_samples).detach().cpu().tolist()} "
+                        f"outer_rp_abs_mean_deg={(interval_outer_rp_abs_sum / max(interval_diag_samples, 1)).detach().cpu().tolist()} "
+                        f"outer_rp_delta_abs_mean_deg={(interval_outer_rp_delta_abs_sum / interval_delta_samples).detach().cpu().tolist()} "
+                        f"smoothed_rp_abs_mean_deg={(interval_smoothed_rp_abs_sum / max(interval_diag_samples, 1)).detach().cpu().tolist()} "
+                        f"smoothed_rp_delta_abs_mean_deg={(interval_smoothed_rp_delta_abs_sum / interval_delta_samples).detach().cpu().tolist()} "
+                        f"vel_tracking_error_mean={interval_vel_tracking_error_sum / max(interval_diag_samples, 1):.6f}"
+                        f" overspeed_rate={interval_overspeed_count / max(interval_diag_samples, 1):.6f}"
+                    )
+                    interval_diag_samples = 0
+                    interval_action_delta_abs_sum.zero_()
+                    interval_action_jump_count.zero_()
+                    interval_action_saturation_count.zero_()
+                    interval_cmd_delta_abs_sum.zero_()
+                    interval_cmd_yaw_delta_abs_sum = 0.0
+                    interval_yaw_error_abs_sum = 0.0
+                    interval_vel_delta_abs_sum.zero_()
+                    interval_rpy_delta_abs_sum.zero_()
+                    interval_outer_rp_abs_sum.zero_()
+                    interval_outer_rp_delta_abs_sum.zero_()
+                    interval_smoothed_rp_abs_sum.zero_()
+                    interval_smoothed_rp_delta_abs_sum.zero_()
+                    interval_vel_tracking_error_sum = 0.0
+                    interval_overspeed_count = 0.0
 
         total_samples = eval_steps * args.num_envs
         mean_reward = reward_sum / total_samples
@@ -188,6 +375,25 @@ def main():
         avg_speed_xy = speed_xy_sum / total_samples
         action_abs_mean = (action_abs_sum / total_samples).tolist()
         action_rms = torch.sqrt(action_sq_sum / total_samples).tolist()
+        action_saturation_rate = (action_saturation_count / total_samples).tolist()
+        delta_samples = max((eval_steps - 1) * args.num_envs, 1)
+        action_delta_abs_mean = (action_delta_abs_sum / delta_samples).tolist()
+        action_delta_rms = torch.sqrt(action_delta_sq_sum / delta_samples).tolist()
+        action_jump_rate = (action_jump_count / delta_samples).tolist()
+        target_cmd_delta_abs_mean = (target_cmd_delta_abs_sum / delta_samples).tolist()
+        cmd_delta_abs_mean = (cmd_delta_abs_sum / delta_samples).tolist()
+        cmd_yaw_abs_mean = cmd_yaw_abs_sum / max(diag_sample_count, 1)
+        cmd_yaw_delta_abs_mean = cmd_yaw_delta_abs_sum / delta_samples
+        yaw_error_abs_mean = yaw_error_abs_sum / max(diag_sample_count, 1)
+        vel_delta_abs_mean = (vel_delta_abs_sum / delta_samples).tolist()
+        rpy_abs_mean = (rpy_abs_sum / max(diag_sample_count, 1)).tolist()
+        rpy_delta_abs_mean = (rpy_delta_abs_sum / delta_samples).tolist()
+        outer_rp_abs_mean = (outer_rp_abs_sum / max(diag_sample_count, 1)).tolist()
+        outer_rp_delta_abs_mean = (outer_rp_delta_abs_sum / delta_samples).tolist()
+        smoothed_rp_abs_mean = (smoothed_rp_abs_sum / max(diag_sample_count, 1)).tolist()
+        smoothed_rp_delta_abs_mean = (smoothed_rp_delta_abs_sum / delta_samples).tolist()
+        rate_des_abs_mean = (rate_des_abs_sum / max(diag_sample_count, 1)).tolist()
+        rate_actual_abs_mean = (rate_actual_abs_sum / max(diag_sample_count, 1)).tolist()
 
         log("=== Evaluation Summary ===")
         log(f"model={args.model}")
@@ -234,6 +440,32 @@ def main():
             log(f"final_wall_distance_median={final_wall_distance.median().item():.4f}")
         log(f"action_abs_mean={action_abs_mean}")
         log(f"action_rms={action_rms}")
+        log(f"action_saturation_rate_abs_gt_0p95={action_saturation_rate}")
+        log("=== Control Diagnostics ===")
+        log(f"action_delta_abs_mean={action_delta_abs_mean}")
+        log(f"action_delta_rms={action_delta_rms}")
+        log(f"action_jump_rate_abs_delta_gt_0p5={action_jump_rate}")
+        log(f"target_cmd_delta_abs_mean={target_cmd_delta_abs_mean}")
+        log(f"cmd_delta_abs_mean={cmd_delta_abs_mean}")
+        log(f"cmd_yaw_abs_mean_deg={cmd_yaw_abs_mean:.6f}")
+        log(f"cmd_yaw_delta_abs_mean_deg={cmd_yaw_delta_abs_mean:.6f}")
+        log(f"yaw_error_abs_mean_deg={yaw_error_abs_mean:.6f}")
+        log(f"vel_delta_abs_mean={vel_delta_abs_mean}")
+        log(f"cmd_tracking_error_mean={cmd_tracking_error_sum / max(diag_sample_count, 1):.6f}")
+        log(f"vel_tracking_error_mean={vel_tracking_error_sum / max(diag_sample_count, 1):.6f}")
+        log(f"overspeed_rate_xy_gt_cmd_max={overspeed_count / max(diag_sample_count, 1):.6f}")
+        log(f"speed_delta_mean={speed_delta_sum / delta_samples:.6f}")
+        log(f"rpy_abs_mean_deg={rpy_abs_mean}")
+        log(f"rpy_delta_abs_mean_deg={rpy_delta_abs_mean}")
+        log(f"outer_rp_abs_mean_deg={outer_rp_abs_mean}")
+        log(f"outer_rp_delta_abs_mean_deg={outer_rp_delta_abs_mean}")
+        log(f"smoothed_rp_abs_mean_deg={smoothed_rp_abs_mean}")
+        log(f"smoothed_rp_delta_abs_mean_deg={smoothed_rp_delta_abs_mean}")
+        log(f"rate_des_abs_mean_dps={rate_des_abs_mean}")
+        log(f"rate_actual_abs_mean_dps={rate_actual_abs_mean}")
+        log(f"thrust_pwm_abs_mean={thrust_pwm_sum / max(diag_sample_count, 1):.3f}")
+        log(f"thrust_pwm_delta_abs_mean={thrust_pwm_delta_sum / delta_samples:.3f}")
+        log(f"motor_pwm_range_mean={motor_pwm_range_sum / max(diag_sample_count, 1):.3f}")
 
         env.close()
     except Exception as exc:

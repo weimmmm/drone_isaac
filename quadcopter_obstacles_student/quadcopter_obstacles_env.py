@@ -91,8 +91,14 @@ class QuadcopterObstaclesEnvCfg:
     target_reach_threshold: float = 0.5
     drone_spawn_min_separation: float = 1.0
 
-    cmd_body_vel_xy_max: float = 1.0
+    cmd_body_vel_xy_max: float = 2.0
     cmd_vel_z_max: float = 1.0
+    cmd_vel_smoothing_alpha: float = 0.35
+    cmd_body_vel_xy_rate_limit: float = 2.0
+    cmd_vel_z_rate_limit: float = 4.0
+    cmd_yaw_angle_max: float = 180.0
+    cmd_yaw_smoothing_alpha: float = 0.35
+    cmd_yaw_rate_limit: float = 90.0
 
     vel_tracking_reward_scale: float = 0.5
     vel_tracking_exp_scale: float = 4.0
@@ -106,9 +112,15 @@ class QuadcopterObstaclesEnvCfg:
     dynamic_collision_penalty: float = -40.0
     wall_collision_penalty: float = -40.0
     height_violation_penalty: float = -40.0
+    action_rate_penalty_scale: float = -1.0
+    cmd_rate_penalty_scale: float = -1.5
+    velocity_accel_penalty_scale: float = -0.8
+    overspeed_penalty_scale: float = -0.20
+    yaw_alignment_reward_scale: float = 1.0
+    yaw_error_penalty_scale: float = -0.2
 
     observation_space: int = 0
-    action_space: int = 3
+    action_space: int = 4
     state_space: int = 0
     debug_vis: bool = False
     viewer_eye: tuple[float, float, float] = (-30.0, 0.0, 80.0)
@@ -147,6 +159,22 @@ class QuadcopterObstaclesEnv(gym.Env):
         self.device = torch.device(self.cfg.device)
         self.num_envs = self.cfg.scene.num_envs
         self.step_dt = self.cfg.physics_dt * self.cfg.decimation
+        cmd_xy_delta = (
+            float(self.cfg.cmd_body_vel_xy_rate_limit) * self.step_dt
+            if float(self.cfg.cmd_body_vel_xy_rate_limit) > 0.0
+            else float("inf")
+        )
+        cmd_z_delta = (
+            float(self.cfg.cmd_vel_z_rate_limit) * self.step_dt
+            if float(self.cfg.cmd_vel_z_rate_limit) > 0.0
+            else float("inf")
+        )
+        self._cmd_vel_max_delta = torch.tensor([cmd_xy_delta, cmd_xy_delta, cmd_z_delta], device=self.device)
+        self._cmd_yaw_max_delta = (
+            float(self.cfg.cmd_yaw_rate_limit) * self.step_dt
+            if float(self.cfg.cmd_yaw_rate_limit) > 0.0
+            else float("inf")
+        )
         self.max_episode_length = int(round(self.cfg.episode_length_s / self.step_dt))
         self.max_episode_length_s = self.max_episode_length * self.step_dt
         self.num_states = 0
@@ -181,7 +209,13 @@ class QuadcopterObstaclesEnv(gym.Env):
         self._robot_mass = 0.0
 
         self._actions = torch.zeros((self.num_envs, self.cfg.action_space), device=self.device)
+        self._prev_actions = torch.zeros((self.num_envs, self.cfg.action_space), device=self.device)
+        self._target_cmd_vel_b = torch.zeros((self.num_envs, 3), device=self.device)
         self._cmd_vel_b = torch.zeros((self.num_envs, 3), device=self.device)
+        self._prev_cmd_vel_b = torch.zeros((self.num_envs, 3), device=self.device)
+        self._prev_velocity_cmd_frame = torch.zeros((self.num_envs, 3), device=self.device)
+        self._target_cmd_yaw_deg = torch.zeros(self.num_envs, device=self.device)
+        self._cmd_yaw_deg = torch.zeros(self.num_envs, device=self.device)
         self._thrust = torch.zeros((self.num_envs, 1, 3), device=self.device)
         self._moment = torch.zeros((self.num_envs, 1, 3), device=self.device)
         self._controller = CrazyflieController(
@@ -234,6 +268,12 @@ class QuadcopterObstaclesEnv(gym.Env):
                 "dynamic_collision_penalty",
                 "wall_collision_penalty",
                 "height_violation_penalty",
+                "action_rate",
+                "cmd_rate",
+                "velocity_accel",
+                "overspeed",
+                "yaw_alignment",
+                "yaw_error",
                 "vel_tracking_error",
             ]
         }
@@ -974,7 +1014,14 @@ class QuadcopterObstaclesEnv(gym.Env):
         self._rew_buf[env_ids] = 0.0
         self.episode_length_buf[env_ids] = 0
         self._cmd_vel_b[env_ids] = 0.0
+        self._target_cmd_vel_b[env_ids] = 0.0
+        initial_yaw_deg = torch.rad2deg(yaw)
+        self._cmd_yaw_deg[env_ids] = initial_yaw_deg
+        self._target_cmd_yaw_deg[env_ids] = initial_yaw_deg
         self._actions[env_ids] = 0.0
+        self._prev_actions[env_ids] = 0.0
+        self._prev_cmd_vel_b[env_ids] = 0.0
+        self._prev_velocity_cmd_frame[env_ids] = 0.0
 
         controller_state = {
             "position": root_state[:, :3].clone(),
@@ -988,6 +1035,7 @@ class QuadcopterObstaclesEnv(gym.Env):
             velocity_body=True,
             env_ids=env_ids,
         )
+        self._controller.yaw_setpoint[env_ids] = initial_yaw_deg
 
         # Refresh local robot buffers after writing the reset state without advancing physics.
         self.robot.update(0.0)
@@ -996,14 +1044,48 @@ class QuadcopterObstaclesEnv(gym.Env):
             self._episode_sums[key][env_ids] = 0.0
         return self._get_observations()
 
+    def _update_command_from_actions(self, actions: torch.Tensor) -> None:
+        self._target_cmd_vel_b[:, :2] = actions[:, :2] * self.cfg.cmd_body_vel_xy_max
+        self._target_cmd_vel_b[:, 2] = actions[:, 2] * self.cfg.cmd_vel_z_max
+
+        alpha = max(0.0, min(float(self.cfg.cmd_vel_smoothing_alpha), 1.0))
+        if alpha >= 1.0:
+            next_cmd = self._target_cmd_vel_b
+        else:
+            next_cmd = self._cmd_vel_b + alpha * (self._target_cmd_vel_b - self._cmd_vel_b)
+
+        xy_rate_limit = float(self.cfg.cmd_body_vel_xy_rate_limit)
+        z_rate_limit = float(self.cfg.cmd_vel_z_rate_limit)
+        if xy_rate_limit > 0.0 or z_rate_limit > 0.0:
+            delta = (next_cmd - self._cmd_vel_b).clamp(-self._cmd_vel_max_delta, self._cmd_vel_max_delta)
+            next_cmd = self._cmd_vel_b + delta
+
+        self._cmd_vel_b[:] = next_cmd
+
+        self._target_cmd_yaw_deg[:] = self._wrap_angle_deg(actions[:, 3] * self.cfg.cmd_yaw_angle_max)
+        yaw_alpha = max(0.0, min(float(self.cfg.cmd_yaw_smoothing_alpha), 1.0))
+        yaw_delta = self._wrap_angle_deg(self._target_cmd_yaw_deg - self._cmd_yaw_deg)
+        if yaw_alpha >= 1.0:
+            next_yaw_delta = yaw_delta
+        else:
+            next_yaw_delta = yaw_alpha * yaw_delta
+        if float(self.cfg.cmd_yaw_rate_limit) > 0.0:
+            next_yaw_delta = next_yaw_delta.clamp(-self._cmd_yaw_max_delta, self._cmd_yaw_max_delta)
+        self._cmd_yaw_deg[:] = self._wrap_angle_deg(self._cmd_yaw_deg + next_yaw_delta)
+
+    def _wrap_angle_deg(self, angle_deg: torch.Tensor) -> torch.Tensor:
+        return torch.remainder(angle_deg + 180.0, 360.0) - 180.0
+
     def step(self, actions: torch.Tensor):
         if not self._built:
             raise RuntimeError("Call reset() before step().")
 
         actions = actions.to(self.device).clamp(-1.0, 1.0)
+        prev_actions = self._prev_actions.clone()
+        prev_cmd_vel_b = self._prev_cmd_vel_b.clone()
+        prev_velocity_cmd_frame = self._prev_velocity_cmd_frame.clone()
         self._actions[:] = actions
-        self._cmd_vel_b[:, :2] = actions[:, :2] * self.cfg.cmd_body_vel_xy_max
-        self._cmd_vel_b[:, 2] = actions[:, 2] * self.cfg.cmd_vel_z_max
+        self._update_command_from_actions(actions)
 
         root_quat_w = self.robot.data.root_quat_w
         root_ang_vel_b = quat_apply_inverse(root_quat_w, self.robot.data.root_ang_vel_w)
@@ -1013,6 +1095,7 @@ class QuadcopterObstaclesEnv(gym.Env):
             vz=self._cmd_vel_b[:, 2],
             velocity_body=True,
         )
+        self._controller.yaw_setpoint[:] = self._cmd_yaw_deg
         force, torque = self._controller.compute(
             {
                 "position": self.robot.data.root_pos_w,
@@ -1035,11 +1118,16 @@ class QuadcopterObstaclesEnv(gym.Env):
         self.episode_length_buf += 1
 
         root_quat_w = self.robot.data.root_quat_w
+        root_rpy_deg = _quat_to_euler_deg(root_quat_w)
         root_lin_vel_b = quat_apply_inverse(root_quat_w, self.robot.data.root_lin_vel_w)
         root_ang_vel_b = quat_apply_inverse(root_quat_w, self.robot.data.root_ang_vel_w)
         target_vec_w = self._target_positions_w - self.robot.data.root_pos_w
         distance_to_target = torch.linalg.norm(target_vec_w, dim=1)
         target_direction = target_vec_w / distance_to_target.unsqueeze(1).clamp_min(1e-6)
+        target_yaw_deg = torch.rad2deg(torch.atan2(target_vec_w[:, 1], target_vec_w[:, 0]))
+        yaw_error_deg = self._wrap_angle_deg(target_yaw_deg - root_rpy_deg[:, 2])
+        yaw_alignment = 0.5 * (torch.cos(torch.deg2rad(yaw_error_deg)) + 1.0)
+        yaw_error_norm = torch.abs(yaw_error_deg) / 180.0
 
         velocity_cmd_frame = torch.stack(
             [
@@ -1052,9 +1140,14 @@ class QuadcopterObstaclesEnv(gym.Env):
         vel_tracking_sq_error = torch.sum(torch.square(self._cmd_vel_b - velocity_cmd_frame), dim=1)
         vel_tracking_error = torch.linalg.norm(self._cmd_vel_b - velocity_cmd_frame, dim=1)
         vel_tracking = torch.exp(-self.cfg.vel_tracking_exp_scale * vel_tracking_sq_error)
+        action_rate = torch.sum(torch.square(actions - prev_actions), dim=1)
+        cmd_rate = torch.sum(torch.square(self._cmd_vel_b - prev_cmd_vel_b), dim=1)
+        velocity_accel = torch.sum(torch.square(velocity_cmd_frame - prev_velocity_cmd_frame), dim=1)
+        speed_xy = torch.linalg.norm(self.robot.data.root_lin_vel_w[:, :2], dim=1)
+        overspeed = torch.square((speed_xy - self.cfg.cmd_body_vel_xy_max).clamp_min(0.0))
         ang_vel = torch.sum(torch.square(root_ang_vel_b), dim=1)
         distance_reward = 1.0 - torch.tanh(distance_to_target / 2.0)
-        target_velocity = torch.sum(self.robot.data.root_lin_vel_w * target_direction, dim=1).clamp(-1.0, 1.5)
+        target_velocity = torch.sum(self.robot.data.root_lin_vel_w * target_direction, dim=1).clamp(-1.0, 2.0)
         progress_reward = (self._prev_dist_to_target - distance_to_target).clamp(-1.0, 1.0)
         self._prev_dist_to_target = distance_to_target.clone()
 
@@ -1094,12 +1187,21 @@ class QuadcopterObstaclesEnv(gym.Env):
             "dynamic_collision_penalty": dynamic_obstacle_collision.float() * self.cfg.dynamic_collision_penalty,
             "wall_collision_penalty": wall_collision.float() * self.cfg.wall_collision_penalty,
             "height_violation_penalty": height_violation.float() * self.cfg.height_violation_penalty,
+            "action_rate": action_rate * self.cfg.action_rate_penalty_scale * self.step_dt,
+            "cmd_rate": cmd_rate * self.cfg.cmd_rate_penalty_scale * self.step_dt,
+            "velocity_accel": velocity_accel * self.cfg.velocity_accel_penalty_scale * self.step_dt,
+            "overspeed": overspeed * self.cfg.overspeed_penalty_scale * self.step_dt,
+            "yaw_alignment": yaw_alignment * self.cfg.yaw_alignment_reward_scale * self.step_dt,
+            "yaw_error": yaw_error_norm * self.cfg.yaw_error_penalty_scale * self.step_dt,
         }
         reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
         for key, value in rewards.items():
             self._episode_sums[key] += value
         self._episode_sums["vel_tracking_error"] += vel_tracking_error * self.step_dt
         self._rew_buf[:] = reward
+        self._prev_actions[:] = actions
+        self._prev_cmd_vel_b[:] = self._cmd_vel_b
+        self._prev_velocity_cmd_frame[:] = velocity_cmd_frame
 
         died = too_low | too_high | obstacle_collision | wall_collision | dynamic_obstacle_collision
         terminated = self._target_reached | died
@@ -1118,6 +1220,8 @@ class QuadcopterObstaclesEnv(gym.Env):
             "closest_dynamic_obstacle_distance": closest_dynamic_obstacle_distance.clone(),
             "closest_wall_distance": closest_wall_distance.clone(),
             "distance_to_target": distance_to_target.clone(),
+            "yaw_error_deg": yaw_error_deg.clone(),
+            "cmd_yaw_deg": self._cmd_yaw_deg.clone(),
         }
 
         done_ids = torch.nonzero(self._done_buf, as_tuple=False).squeeze(-1)

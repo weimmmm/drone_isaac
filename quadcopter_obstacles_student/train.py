@@ -234,21 +234,20 @@ def main():
         resume_path = None
 
     if args_cli.video:
-        video_interval_steps = args_cli.video_interval_iterations * agent_cfg.num_steps_per_env
-        video_kwargs = {
-            "video_folder": os.path.join(log_dir, "videos", "train"),
-            "step_trigger": lambda step: step % video_interval_steps == 0,
-            "video_length": args_cli.video_length,
-            "disable_logger": True,
-        }
-        print("[INFO] Recording videos during training.")
-        print(f"[INFO] Saving one training video every {args_cli.video_interval_iterations} learning iterations.")
-        print_dict(video_kwargs, nesting=4)
-        env = gym.wrappers.RecordVideo(env, **video_kwargs)
+        print("[INFO] Recording videos during evaluation only.")
+        print(f"[INFO] Evaluation video length: {args_cli.video_length} frames.")
+        print(f"[INFO] Evaluation videos will be saved to: {os.path.join(log_dir, 'videos', 'eval')}")
 
     env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
     runner_cfg = class_to_dict(agent_cfg)
     runner_cfg["evaluation"] = yaml_cfg.get("evaluation", {})
+    if args_cli.video:
+        runner_cfg["evaluation"] = dict(runner_cfg["evaluation"])
+        runner_cfg["evaluation"]["record_video"] = True
+        runner_cfg["evaluation"]["video_length"] = args_cli.video_length
+        runner_cfg["evaluation"]["video_interval"] = 1
+        runner_cfg["evaluation"]["video_fps"] = int(round(1.0 / env.unwrapped.step_dt))
+        runner_cfg["evaluation"]["video_dir"] = os.path.join(log_dir, "videos", "eval")
 
     runner = OnPolicyRunner(env, runner_cfg, log_dir=log_dir, device=agent_cfg.device)
     runner.add_git_repo_to_log(__file__)

@@ -37,6 +37,12 @@ ATTITUDE_ROLL_MAX_DEG = 30.0
 ATTITUDE_PITCH_MAX_DEG = 30.0
 ATTITUDE_YAW_MAX_DEG = 180.0
 
+# Smooth roll/pitch attitude setpoints before the attitude PID.
+# This is useful for vision-based policies where rapid pitch/roll setpoint
+# changes make the body-fixed camera shake even when the path is feasible.
+ATTITUDE_RP_SETPOINT_SMOOTHING_ALPHA = 0.35
+ATTITUDE_RP_SETPOINT_RATE_LIMIT_DPS = 30.0
+
 # Max yaw rate used for velocity/position yaw integration (deg/s)
 ATTITUDE_YAW_RATE_MAX_DPS = 120.0
 
@@ -150,8 +156,8 @@ PID_VEL_Z_KD = 2.0
 PID_VEL_Z_KFF = 0.0
 
 # Velocity limits for attitude output
-PID_VEL_ROLL_MAX = 20.0   # degrees
-PID_VEL_PITCH_MAX = 20.0  # degrees
+PID_VEL_ROLL_MAX = 15.0   # degrees
+PID_VEL_PITCH_MAX = 15.0  # degrees
 
 # Thrust base and minimum (in PWM scale 0-65535)
 # Base set to hover thrust for current mass/thrust model.

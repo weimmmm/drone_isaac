@@ -135,6 +135,15 @@ class WandbSummaryWriter(SummaryWriter):
     def save_file(self, path, iter=None):
         wandb.save(path, base_path=os.path.dirname(path))
 
+    def add_video_file(self, tag, path, global_step=None, fps=50):
+        if global_step is not None:
+            wandb.log(
+                {tag: wandb.Video(path, fps=fps, format="mp4"), "Train/iteration": int(global_step)},
+                step=int(global_step),
+            )
+        else:
+            wandb.log({tag: wandb.Video(path, fps=fps, format="mp4")})
+
     """
     Private methods.
     """

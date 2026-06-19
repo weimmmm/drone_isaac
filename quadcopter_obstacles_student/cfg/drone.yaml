@@ -9,5 +9,11 @@ flight_max_height: 4.0
 target_reach_threshold: 0.5
 drone_spawn_min_separation: 1.0
 
-cmd_body_vel_xy_max: 1.0
+cmd_body_vel_xy_max: 2.0
 cmd_vel_z_max: 1.0
+cmd_vel_smoothing_alpha: 0.35
+cmd_body_vel_xy_rate_limit: 2.0
+cmd_vel_z_rate_limit: 4.0
+cmd_yaw_angle_max: 180.0
+cmd_yaw_smoothing_alpha: 0.35
+cmd_yaw_rate_limit: 90.0

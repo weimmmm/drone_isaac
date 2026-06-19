@@ -10,3 +10,9 @@ static_collision_penalty: -80.0
 dynamic_collision_penalty: -80.0
 wall_collision_penalty: -80.0
 height_violation_penalty: -40.0
+action_rate_penalty_scale: -1.0
+cmd_rate_penalty_scale: -1.5
+velocity_accel_penalty_scale: -0.8
+overspeed_penalty_scale: -0.20
+yaw_alignment_reward_scale: 1.0
+yaw_error_penalty_scale: -0.2

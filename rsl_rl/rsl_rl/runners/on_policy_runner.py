@@ -10,6 +10,7 @@ import statistics
 import time
 import torch
 import warnings
+import numpy as np
 from collections import deque
 
 import rsl_rl
@@ -419,12 +420,30 @@ class OnPolicyRunner:
         speed_xy_sum = 0.0
         sample_count = 0
         steps_run = 0
+        video_frames = []
+        record_video = bool(self.evaluation_cfg.get("record_video", False))
+        video_length = max(1, int(self.evaluation_cfg.get("video_length", 250) or 250))
+        video_interval = max(1, int(self.evaluation_cfg.get("video_interval", 1) or 1))
+        video_fps = int(self.evaluation_cfg.get("video_fps", 50) or 50)
+        if record_video:
+            print(
+                f"[Eval] video enabled: length={video_length}, interval={video_interval}, fps={video_fps}",
+                flush=True,
+            )
 
         with torch.inference_mode():
             for step in range(eval_steps):
                 steps_run = step + 1
                 actions = policy(obs)
                 obs, rewards, dones, extras = self.env.step(actions.to(self.env.device))
+                if record_video and len(video_frames) < video_length and step % video_interval == 0:
+                    frame = None
+                    if hasattr(unwrapped_env, "render"):
+                        frame = unwrapped_env.render()
+                    elif hasattr(self.env, "render"):
+                        frame = self.env.render()
+                    if frame is not None:
+                        video_frames.append(np.asarray(frame))
                 obs = obs.to(self.device)
                 rewards = rewards.to(self.device)
                 rewards_eval = rewards.reshape(-1)[eval_slice]
@@ -532,6 +551,11 @@ class OnPolicyRunner:
             info["Eval/final_obstacle_distance_mean"] = first_obstacle_distance[done_seen].mean().item()
             info["Eval/final_dynamic_obstacle_distance_mean"] = first_dynamic_obstacle_distance[done_seen].mean().item()
             info["Eval/final_wall_distance_mean"] = first_wall_distance[done_seen].mean().item()
+        if record_video and video_frames:
+            video_path = self._save_evaluation_video(video_frames, video_fps)
+            if video_path is not None:
+                info["Eval/video_frames"] = float(len(video_frames))
+                info["Eval/video_path"] = video_path
 
         if hasattr(unwrapped_env, "train"):
             unwrapped_env.train()
@@ -544,6 +568,24 @@ class OnPolicyRunner:
             flush=True,
         )
         return info, obs
+
+    def _save_evaluation_video(self, frames: list[np.ndarray], fps: int) -> str | None:
+        if self.log_dir is None:
+            return None
+        video_dir = self.evaluation_cfg.get("video_dir")
+        if not video_dir:
+            video_dir = os.path.join(self.log_dir, "videos", "eval")
+        os.makedirs(video_dir, exist_ok=True)
+        video_path = os.path.join(video_dir, f"eval_{self.current_learning_iteration:06d}.mp4")
+        try:
+            import imageio.v2 as imageio
+
+            imageio.mimsave(video_path, frames, fps=fps)
+        except Exception as err:
+            print(f"[Eval] failed to save video: {err}", flush=True)
+            return None
+        print(f"[Eval] video saved: {video_path}", flush=True)
+        return video_path
 
     def train_mode(self):
         # -- PPO
@@ -577,6 +619,19 @@ class OnPolicyRunner:
         if self.writer is None:
             return
         for key, value in eval_info.items():
+            if key == "Eval/video_path":
+                if hasattr(self.writer, "add_video_file"):
+                    self.writer.add_video_file(
+                        "Eval/video",
+                        value,
+                        iteration,
+                        fps=int(self.evaluation_cfg.get("video_fps", 50) or 50),
+                    )
+                elif hasattr(self.writer, "save_file"):
+                    self.writer.save_file(value, iteration)
+                continue
+            if not isinstance(value, (int, float)):
+                continue
             self.writer.add_scalar(key, value, iteration)
 
     def _reset_env_for_eval(self) -> TensorDict:
