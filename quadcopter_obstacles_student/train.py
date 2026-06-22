@@ -3,18 +3,25 @@ from __future__ import annotations
 import argparse
 import os
 import pickle
+import random
 import re
 import sys
 import faulthandler
 from datetime import datetime
 
 
+DEFAULT_REPRO_SEED = 3407
 TASK_DIR = os.path.abspath(os.path.dirname(__file__))
 ENV_DIR = os.path.abspath(os.path.join(TASK_DIR, ".."))
 ROOT_DIR = os.path.abspath(os.path.join(TASK_DIR, "..", ".."))
 LOCAL_RSL_RL_DIR = os.path.join(ENV_DIR, "rsl_rl")
+ISAACLAB_ROOT = os.environ.get("ISAACLAB_PATH", "/home/wei/IsaacLab")
+ISAACLAB_SOURCE_DIRS = [
+    os.path.join(ISAACLAB_ROOT, "source", name)
+    for name in ("isaaclab", "isaaclab_assets", "isaaclab_rl", "isaaclab_tasks")
+]
 
-for path in (ROOT_DIR, ENV_DIR, LOCAL_RSL_RL_DIR):
+for path in (ROOT_DIR, ENV_DIR, LOCAL_RSL_RL_DIR, *ISAACLAB_SOURCE_DIRS):
     if path not in sys.path:
         sys.path.insert(0, path)
 
@@ -38,6 +45,60 @@ def _ensure_conda_lib_first() -> None:
 _ensure_conda_lib_first()
 
 
+def _bootstrap_repro_env(seed: int) -> None:
+    """Set process-level reproducibility env vars before Isaac/Torch imports."""
+    required_env = {
+        "PYTHONHASHSEED": str(seed),
+        "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
+    }
+    desired_env = os.environ.copy()
+    python_paths = [path for path in (ROOT_DIR, ENV_DIR, LOCAL_RSL_RL_DIR, *ISAACLAB_SOURCE_DIRS) if os.path.isdir(path)]
+    existing_pythonpath = desired_env.get("PYTHONPATH", "")
+    desired_env["PYTHONPATH"] = os.pathsep.join(
+        [*python_paths, *[path for path in existing_pythonpath.split(os.pathsep) if path]]
+    )
+    desired_env.setdefault("PYTHONUNBUFFERED", "1")
+    changed = []
+    for key, value in required_env.items():
+        if desired_env.get(key) != value:
+            desired_env[key] = value
+            changed.append(f"{key}={value}")
+
+    desired_env.setdefault("OMNI_KIT_RENDERER", "Vulkan")
+    desired_env.setdefault("OMNI_KIT_NO_OPENGL_RENDERING", "1")
+    if desired_env.get("OMNI_KIT_RENDERER") != os.environ.get("OMNI_KIT_RENDERER"):
+        changed.append(f"OMNI_KIT_RENDERER={desired_env['OMNI_KIT_RENDERER']}")
+    if desired_env.get("OMNI_KIT_NO_OPENGL_RENDERING") != os.environ.get("OMNI_KIT_NO_OPENGL_RENDERING"):
+        changed.append(f"OMNI_KIT_NO_OPENGL_RENDERING={desired_env['OMNI_KIT_NO_OPENGL_RENDERING']}")
+    if desired_env.get("PYTHONUNBUFFERED") != os.environ.get("PYTHONUNBUFFERED"):
+        changed.append("PYTHONUNBUFFERED=1")
+
+    if changed:
+        if os.environ.get("QUADCOPTER_REPRO_BOOTSTRAPPED") == "1":
+            raise RuntimeError("Reproducibility bootstrap failed: " + ", ".join(changed))
+        desired_env["QUADCOPTER_REPRO_BOOTSTRAPPED"] = "1"
+        print("[INFO] Re-exec with reproducibility env: " + ", ".join(changed), flush=True)
+        os.execvpe(sys.executable, [sys.executable, *sys.argv], desired_env)
+
+
+def _preparse_seed(default_seed: int) -> int:
+    for idx, arg in enumerate(sys.argv[1:], start=1):
+        if arg == "--seed" and idx + 1 < len(sys.argv):
+            try:
+                return int(sys.argv[idx + 1])
+            except ValueError:
+                return default_seed
+        if arg.startswith("--seed="):
+            try:
+                return int(arg.split("=", 1)[1])
+            except ValueError:
+                return default_seed
+    return default_seed
+
+
+_bootstrap_repro_env(_preparse_seed(DEFAULT_REPRO_SEED))
+
+
 from isaaclab.app import AppLauncher
 
 
@@ -47,9 +108,9 @@ parser.add_argument("--video", dest="video", action="store_true")
 parser.add_argument("--no_video", dest="video", action="store_false")
 parser.add_argument("--video_length", type=int, default=250)
 parser.add_argument("--video_interval_iterations", type=int, default=200)
-parser.add_argument("--num_envs", type=int, default=8196)
+parser.add_argument("--num_envs", type=int, default=8190)
 parser.add_argument("--task", type=str, default="Isaac-Quadcopter-Obstacles-Student-v0")
-parser.add_argument("--seed", type=int, default=None)
+parser.add_argument("--seed", type=int, default=DEFAULT_REPRO_SEED)
 parser.add_argument("--max_iterations", type=int, default=None)
 parser.add_argument("--resume", action="store_true", default=False)
 parser.add_argument("--load_run", type=str, default=None)
@@ -66,6 +127,7 @@ parser.add_argument("--wandb_run_id", type=str, default=None)
 parser.add_argument("--debug_hang_trace_s", type=float, default=0.0)
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
+_bootstrap_repro_env(args_cli.seed)
 
 if args_cli.video:
     args_cli.enable_cameras = True
@@ -77,6 +139,7 @@ app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
 import gymnasium as gym
+import numpy as np
 import torch
 
 from isaaclab.utils.dict import class_to_dict, print_dict
@@ -89,10 +152,25 @@ import quadcopter_obstacles_student  # noqa: F401
 from quadcopter_obstacles_student.config_utils import apply_env_cfg_dir, load_yaml_cfg
 
 
-torch.backends.cuda.matmul.allow_tf32 = True
-torch.backends.cudnn.allow_tf32 = True
-torch.backends.cudnn.deterministic = False
-torch.backends.cudnn.benchmark = False
+def _configure_determinism(seed: int) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    try:
+        torch.set_float32_matmul_precision("highest")
+    except Exception:
+        pass
+    torch.use_deterministic_algorithms(False)
+
+
+_configure_determinism(args_cli.seed)
 
 
 def _load_cfg_from_registry(task_name: str, entry_point_key: str):
@@ -171,8 +249,7 @@ def main():
         env_cfg.scene.num_envs = args_cli.num_envs
     if args_cli.max_iterations is not None:
         agent_cfg.max_iterations = args_cli.max_iterations
-    if args_cli.seed is not None:
-        agent_cfg.seed = args_cli.seed
+    agent_cfg.seed = args_cli.seed
 
     env_cfg.seed = agent_cfg.seed
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
@@ -226,6 +303,7 @@ def main():
             print(f"[INFO] WandB run id: {os.environ['WANDB_RUN_ID']}")
 
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
+    env.unwrapped.seed(agent_cfg.seed)
 
     if agent_cfg.resume:
         resume_path = _find_checkpoint(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)

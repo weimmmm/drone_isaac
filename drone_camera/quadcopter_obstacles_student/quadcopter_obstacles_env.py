@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 
 import gymnasium as gym
 import numpy as np
+import random
 import torch
 
 import isaaclab.sim as sim_utils
@@ -14,6 +15,9 @@ from pxr import Gf, UsdGeom
 
 from assets.omninxt.omninxt import OMNINXT_CFG
 from controller import CrazyflieController, config as controller_config
+
+
+DEFAULT_REPRO_SEED = 3407
 
 
 def _quat_to_euler_deg(quat_w: torch.Tensor) -> torch.Tensor:
@@ -157,6 +161,10 @@ class QuadcopterObstaclesEnv(gym.Env):
             self.cfg.device = self.cfg.sim.device
 
         self.device = torch.device(self.cfg.device)
+        if self.cfg.seed is None:
+            self.cfg.seed = DEFAULT_REPRO_SEED
+        self._torch_rng = torch.Generator(device=self.device)
+        self.seed(int(self.cfg.seed))
         self.num_envs = self.cfg.scene.num_envs
         self.step_dt = self.cfg.physics_dt * self.cfg.decimation
         cmd_xy_delta = (
@@ -304,9 +312,14 @@ class QuadcopterObstaclesEnv(gym.Env):
 
     def seed(self, seed: int = -1) -> int:
         if seed >= 0:
+            seed = int(seed)
+            random.seed(seed)
+            np.random.seed(seed)
             torch.manual_seed(seed)
             if torch.cuda.is_available():
                 torch.cuda.manual_seed_all(seed)
+            if hasattr(self, "_torch_rng"):
+                self._torch_rng.manual_seed(seed)
             self.cfg.seed = seed
         return seed
 
@@ -357,14 +370,18 @@ class QuadcopterObstaclesEnv(gym.Env):
     def _sample_edge_positions(
         self, num_samples: int, lateral_range: float, min_height: float, max_height: float
     ) -> torch.Tensor:
-        side_indices = torch.randint(0, 4, (num_samples,), device=self.device)
+        side_indices = torch.randint(0, 4, (num_samples,), device=self.device, generator=self._torch_rng)
         side_signs = torch.where(
             side_indices % 2 == 0,
             torch.ones(num_samples, device=self.device),
             -torch.ones(num_samples, device=self.device),
         )
-        lateral = torch.empty(num_samples, device=self.device).uniform_(-lateral_range, lateral_range)
-        heights = torch.empty(num_samples, device=self.device).uniform_(min_height, max_height)
+        lateral = torch.empty(num_samples, device=self.device).uniform_(
+            -lateral_range, lateral_range, generator=self._torch_rng
+        )
+        heights = torch.empty(num_samples, device=self.device).uniform_(
+            min_height, max_height, generator=self._torch_rng
+        )
 
         positions = torch.zeros((num_samples, 3), device=self.device)
         x_side_mask = side_indices < 2
@@ -449,9 +466,11 @@ class QuadcopterObstaclesEnv(gym.Env):
         num_samples = len(source_side_indices)
         opposite_side_indices = torch.where(source_side_indices % 2 == 0, source_side_indices + 1, source_side_indices - 1)
         lateral = torch.empty(num_samples, device=self.device).uniform_(
-            -self.cfg.spawn_edge_distance, self.cfg.spawn_edge_distance
+            -self.cfg.spawn_edge_distance, self.cfg.spawn_edge_distance, generator=self._torch_rng
         )
-        heights = torch.empty(num_samples, device=self.device).uniform_(min_height, max_height)
+        heights = torch.empty(num_samples, device=self.device).uniform_(
+            min_height, max_height, generator=self._torch_rng
+        )
 
         positions = torch.zeros((num_samples, 3), device=self.device)
         y_side_mask = opposite_side_indices < 2
@@ -522,7 +541,9 @@ class QuadcopterObstaclesEnv(gym.Env):
             chosen_score = None
             for _ in range(64):
                 candidate_xy = torch.empty(2, device=self.device).uniform_(
-                    -self.cfg.obstacle_spawn_range, self.cfg.obstacle_spawn_range
+                    -self.cfg.obstacle_spawn_range,
+                    self.cfg.obstacle_spawn_range,
+                    generator=self._torch_rng,
                 )
                 candidate_radius_sq = torch.dot(candidate_xy, candidate_xy)
                 valid = candidate_radius_sq >= self._obstacle_safe_radius_sq
@@ -580,12 +601,12 @@ class QuadcopterObstaclesEnv(gym.Env):
             best_score = None
             for _ in range(128):
                 candidate = torch.empty(3, device=self.device)
-                candidate[0].uniform_(-self.cfg.map_half_extent, self.cfg.map_half_extent)
-                candidate[1].uniform_(-self.cfg.map_half_extent, self.cfg.map_half_extent)
+                candidate[0].uniform_(-self.cfg.map_half_extent, self.cfg.map_half_extent, generator=self._torch_rng)
+                candidate[1].uniform_(-self.cfg.map_half_extent, self.cfg.map_half_extent, generator=self._torch_rng)
                 if is_2d:
                     candidate[2] = self.cfg.dynamic_obstacle_2d_height * 0.5
                 else:
-                    candidate[2].uniform_(0.0, self.cfg.flight_max_height)
+                    candidate[2].uniform_(0.0, self.cfg.flight_max_height, generator=self._torch_rng)
 
                 if idx == 0:
                     score = torch.tensor(float("inf"), device=self.device)
@@ -663,9 +684,9 @@ class QuadcopterObstaclesEnv(gym.Env):
 
         local_range = self.cfg.dynamic_obstacle_local_range
         sample = torch.empty((num_new_goals, 3), device=self.device)
-        sample[:, 0].uniform_(-local_range[0], local_range[0])
-        sample[:, 1].uniform_(-local_range[1], local_range[1])
-        sample[:, 2].uniform_(-local_range[2], local_range[2])
+        sample[:, 0].uniform_(-local_range[0], local_range[0], generator=self._torch_rng)
+        sample[:, 1].uniform_(-local_range[1], local_range[1], generator=self._torch_rng)
+        sample[:, 2].uniform_(-local_range[2], local_range[2], generator=self._torch_rng)
 
         goals = self._dynamic_obstacle_origins_w[new_goal_mask] + sample
         goals[:, 0].clamp_(-self.cfg.map_half_extent, self.cfg.map_half_extent)
@@ -683,7 +704,9 @@ class QuadcopterObstaclesEnv(gym.Env):
         goal_delta = self._dynamic_obstacle_goals_w - self._dynamic_obstacle_positions_w
         goal_dir = goal_delta / torch.linalg.norm(goal_delta, dim=1, keepdim=True).clamp_min(1e-6)
         speed_min, speed_max = self.cfg.dynamic_obstacle_vel_range
-        speeds = torch.empty((self._num_dynamic_obstacles, 1), device=self.device).uniform_(speed_min, speed_max)
+        speeds = torch.empty((self._num_dynamic_obstacles, 1), device=self.device).uniform_(
+            speed_min, speed_max, generator=self._torch_rng
+        )
         self._dynamic_obstacle_velocities_w[:] = speeds * goal_dir
 
     def _move_dynamic_obstacles(self) -> None:

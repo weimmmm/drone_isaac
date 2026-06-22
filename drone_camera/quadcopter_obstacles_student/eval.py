@@ -2,19 +2,100 @@ from __future__ import annotations
 
 import argparse
 import os
+import random
 import sys
 
 
+DEFAULT_REPRO_SEED = 3407
 TASK_DIR = os.path.abspath(os.path.dirname(__file__))
 ENV_DIR = os.path.abspath(os.path.join(TASK_DIR, ".."))
 ROOT_DIR = os.path.abspath(os.path.join(TASK_DIR, "..", ".."))
-LOCAL_RSL_RL_DIR = os.path.join(ENV_DIR, "rsl_rl")
+RSL_RL_DIR = os.path.join(ROOT_DIR, "rsl_rl")
+ISAACLAB_ROOT = os.environ.get("ISAACLAB_PATH", "/home/wei/IsaacLab")
+ISAACLAB_SOURCE_DIRS = [
+    os.path.join(ISAACLAB_ROOT, "source", name)
+    for name in ("isaaclab", "isaaclab_assets", "isaaclab_rl", "isaaclab_tasks")
+]
 DEFAULT_MODEL_PATH = "/home/wei/End_to_end/logs/rsl_rl/quadcopter_obstacles_student/2026-06-18_17-17-12_5090_quadcopter_obstacles_student_safe_multihead/model_5300.pt"
 DEFAULT_METRICS_OUT = "/home/wei/End_to_end/logs/rsl_rl/quadcopter_obstacles_student/eval_student_metrics.txt"
 
-for path in (ROOT_DIR, ENV_DIR, LOCAL_RSL_RL_DIR, TASK_DIR):
+for path in (ROOT_DIR, ENV_DIR, RSL_RL_DIR, TASK_DIR, *ISAACLAB_SOURCE_DIRS):
     if path not in sys.path:
         sys.path.insert(0, path)
+
+
+def _bootstrap_repro_env(seed: int) -> None:
+    required_env = {
+        "PYTHONHASHSEED": str(seed),
+        "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
+    }
+    desired_env = os.environ.copy()
+    python_paths = [
+        path
+        for path in (ROOT_DIR, ENV_DIR, RSL_RL_DIR, TASK_DIR, *ISAACLAB_SOURCE_DIRS)
+        if os.path.isdir(path)
+    ]
+    existing_pythonpath = desired_env.get("PYTHONPATH", "")
+    desired_env["PYTHONPATH"] = os.pathsep.join(
+        [*python_paths, *[path for path in existing_pythonpath.split(os.pathsep) if path]]
+    )
+    changed = []
+    for key, value in required_env.items():
+        if desired_env.get(key) != value:
+            desired_env[key] = value
+            changed.append(f"{key}={value}")
+
+    desired_env.setdefault("OMNI_KIT_RENDERER", "Vulkan")
+    desired_env.setdefault("OMNI_KIT_NO_OPENGL_RENDERING", "1")
+    if desired_env.get("OMNI_KIT_RENDERER") != os.environ.get("OMNI_KIT_RENDERER"):
+        changed.append(f"OMNI_KIT_RENDERER={desired_env['OMNI_KIT_RENDERER']}")
+    if desired_env.get("OMNI_KIT_NO_OPENGL_RENDERING") != os.environ.get("OMNI_KIT_NO_OPENGL_RENDERING"):
+        changed.append(f"OMNI_KIT_NO_OPENGL_RENDERING={desired_env['OMNI_KIT_NO_OPENGL_RENDERING']}")
+
+    if changed:
+        if os.environ.get("QUADCOPTER_REPRO_BOOTSTRAPPED") == "1":
+            raise RuntimeError("Reproducibility bootstrap failed: " + ", ".join(changed))
+        desired_env["QUADCOPTER_REPRO_BOOTSTRAPPED"] = "1"
+        print("[INFO] Re-exec with reproducibility env: " + ", ".join(changed), flush=True)
+        os.execvpe(sys.executable, [sys.executable, *sys.argv], desired_env)
+
+
+def _preparse_seed(default_seed: int) -> int:
+    for idx, arg in enumerate(sys.argv[1:], start=1):
+        if arg == "--seed" and idx + 1 < len(sys.argv):
+            try:
+                return int(sys.argv[idx + 1])
+            except ValueError:
+                return default_seed
+        if arg.startswith("--seed="):
+            try:
+                return int(arg.split("=", 1)[1])
+            except ValueError:
+                return default_seed
+    return default_seed
+
+
+_bootstrap_repro_env(_preparse_seed(DEFAULT_REPRO_SEED))
+
+
+def _configure_determinism(seed: int, torch_module) -> None:
+    import numpy as np
+
+    random.seed(seed)
+    np.random.seed(seed)
+    torch_module.manual_seed(seed)
+    if torch_module.cuda.is_available():
+        torch_module.cuda.manual_seed(seed)
+        torch_module.cuda.manual_seed_all(seed)
+    torch_module.backends.cuda.matmul.allow_tf32 = False
+    torch_module.backends.cudnn.allow_tf32 = False
+    torch_module.backends.cudnn.deterministic = True
+    torch_module.backends.cudnn.benchmark = False
+    try:
+        torch_module.set_float32_matmul_precision("highest")
+    except Exception:
+        pass
+    torch_module.use_deterministic_algorithms(False)
 
 
 def main():
@@ -26,12 +107,13 @@ def main():
     parser.add_argument("--steps", type=int, default=None)
     parser.add_argument("--model", type=str, default=DEFAULT_MODEL_PATH)
     parser.add_argument("--metrics_out", type=str, default=DEFAULT_METRICS_OUT)
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--seed", type=int, default=DEFAULT_REPRO_SEED)
     parser.add_argument("--diagnostic_interval", type=int, default=250)
     parser.add_argument("--diagnostic_env_id", type=int, default=0)
     parser.add_argument("--env_cfg_dir", type=str, default=os.path.join(TASK_DIR, "cfg"))
     AppLauncher.add_app_launcher_args(parser)
     args = parser.parse_args()
+    _bootstrap_repro_env(args.seed)
     args.enable_cameras = True
 
     os.makedirs(os.path.dirname(args.metrics_out), exist_ok=True)
@@ -50,6 +132,7 @@ def main():
 
         import gymnasium as gym
         import torch
+        _configure_determinism(args.seed, torch)
 
         from isaaclab.utils.dict import class_to_dict
 
@@ -87,6 +170,7 @@ def main():
         env_cfg.debug_vis = False
         env_cfg.sim.device = args.device
         env_cfg.seed = args.seed
+        agent_cfg.seed = args.seed
         agent_cfg.device = args.device
 
         env = gym.make(args.task, cfg=env_cfg, render_mode=None)
