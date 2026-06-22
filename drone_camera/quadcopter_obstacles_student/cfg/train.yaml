@@ -1,0 +1,17 @@
+wandb:
+  project: End_to_End_navigation
+  name: 5090_quadcopter_obstacles_student_safe_multihead
+  entity: weimmmm-university-of-electronic-science-and-technology-
+  mode: online
+  run_id:
+
+evaluation:
+  enabled: True
+  interval: 100
+  num_envs: 2048
+  steps: 2200
+  max_wall_time_s: 180
+  progress_interval: 250
+  reset_before_eval: false
+  reset_chunk_size: 1
+  eval_at_start: false

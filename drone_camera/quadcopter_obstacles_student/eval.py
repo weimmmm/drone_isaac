@@ -157,8 +157,6 @@ def main():
         thrust_pwm_delta_sum = 0.0
         motor_pwm_range_sum = 0.0
         overspeed_count = 0.0
-        outside_map_count = 0.0
-        outside_map_excess_sum = 0.0
         prev_thrust_pwm = None
         interval_action_delta_abs_sum = torch.zeros(env.num_actions, device=args.device)
         interval_action_jump_count = torch.zeros(env.num_actions, device=args.device)
@@ -174,8 +172,6 @@ def main():
         interval_smoothed_rp_delta_abs_sum = torch.zeros(2, device=args.device)
         interval_vel_tracking_error_sum = 0.0
         interval_overspeed_count = 0.0
-        interval_outside_map_count = 0.0
-        interval_outside_map_excess_sum = 0.0
         final_target_distance = None
         final_obstacle_distance = None
         final_dynamic_obstacle_distance = None
@@ -236,10 +232,6 @@ def main():
                 cmd_yaw = getattr(unwrapped, "_cmd_yaw_deg", torch.zeros(args.num_envs, device=args.device))
                 target_cmd_yaw = getattr(unwrapped, "_target_cmd_yaw_deg", cmd_yaw)
                 yaw_error_deg = extras.get("yaw_error_deg", torch.zeros(args.num_envs, device=args.device))
-                outside_map_excess = extras.get(
-                    "outside_map_excess",
-                    torch.zeros(args.num_envs, device=args.device),
-                )
                 controller = unwrapped._controller
                 outer_rp = torch.stack([controller._outer_roll_cmd, controller._outer_pitch_cmd], dim=1)
                 smoothed_rp = torch.stack([controller._smoothed_roll_des, controller._smoothed_pitch_des], dim=1)
@@ -251,10 +243,6 @@ def main():
                 speed_xy_now = torch.linalg.norm(lin_vel_w[:, :2], dim=1)
                 overspeed_count += (speed_xy_now > float(unwrapped.cfg.cmd_body_vel_xy_max)).float().sum().item()
                 interval_overspeed_count += (speed_xy_now > float(unwrapped.cfg.cmd_body_vel_xy_max)).float().sum().item()
-                outside_map_count += (outside_map_excess > 0.0).float().sum().item()
-                interval_outside_map_count += (outside_map_excess > 0.0).float().sum().item()
-                outside_map_excess_sum += outside_map_excess.sum().item()
-                interval_outside_map_excess_sum += outside_map_excess.sum().item()
                 rpy_abs_sum += rpy.abs().sum(dim=0)
                 outer_rp_abs_sum += outer_rp.abs().sum(dim=0)
                 smoothed_rp_abs_sum += smoothed_rp.abs().sum(dim=0)
@@ -340,7 +328,6 @@ def main():
                         f"target_cmd_yaw={float(target_cmd_yaw[env_id].item()):.2f} "
                         f"cmd_yaw={float(cmd_yaw[env_id].item()):.2f} "
                         f"yaw_error={float(yaw_error_deg[env_id].item()):.2f} "
-                        f"outside_map_excess={float(outside_map_excess[env_id].item()):.2f} "
                         f"vel_cmd_frame={vel_cmd_frame[env_id].detach().cpu().tolist()} "
                         f"rpy_deg={rpy[env_id].detach().cpu().tolist()} "
                         f"outer_rp={outer_rp[env_id].detach().cpu().tolist()} "
@@ -364,8 +351,6 @@ def main():
                         f"smoothed_rp_delta_abs_mean_deg={(interval_smoothed_rp_delta_abs_sum / interval_delta_samples).detach().cpu().tolist()} "
                         f"vel_tracking_error_mean={interval_vel_tracking_error_sum / max(interval_diag_samples, 1):.6f}"
                         f" overspeed_rate={interval_overspeed_count / max(interval_diag_samples, 1):.6f}"
-                        f" outside_map_rate={interval_outside_map_count / max(interval_diag_samples, 1):.6f}"
-                        f" outside_map_excess_mean={interval_outside_map_excess_sum / max(interval_diag_samples, 1):.6f}"
                     )
                     interval_diag_samples = 0
                     interval_action_delta_abs_sum.zero_()
@@ -382,8 +367,6 @@ def main():
                     interval_smoothed_rp_delta_abs_sum.zero_()
                     interval_vel_tracking_error_sum = 0.0
                     interval_overspeed_count = 0.0
-                    interval_outside_map_count = 0.0
-                    interval_outside_map_excess_sum = 0.0
 
         total_samples = eval_steps * args.num_envs
         mean_reward = reward_sum / total_samples
@@ -471,8 +454,6 @@ def main():
         log(f"cmd_tracking_error_mean={cmd_tracking_error_sum / max(diag_sample_count, 1):.6f}")
         log(f"vel_tracking_error_mean={vel_tracking_error_sum / max(diag_sample_count, 1):.6f}")
         log(f"overspeed_rate_xy_gt_cmd_max={overspeed_count / max(diag_sample_count, 1):.6f}")
-        log(f"outside_map_rate={outside_map_count / max(diag_sample_count, 1):.6f}")
-        log(f"outside_map_excess_mean={outside_map_excess_sum / max(diag_sample_count, 1):.6f}")
         log(f"speed_delta_mean={speed_delta_sum / delta_samples:.6f}")
         log(f"rpy_abs_mean_deg={rpy_abs_mean}")
         log(f"rpy_delta_abs_mean_deg={rpy_delta_abs_mean}")

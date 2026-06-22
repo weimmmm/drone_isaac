@@ -90,7 +90,6 @@ class QuadcopterObstaclesEnvCfg:
     flight_max_height: float = 4.0
     target_reach_threshold: float = 0.5
     drone_spawn_min_separation: float = 1.0
-    target_opposite_edge: bool = True
 
     cmd_body_vel_xy_max: float = 2.0
     cmd_vel_z_max: float = 1.0
@@ -119,8 +118,6 @@ class QuadcopterObstaclesEnvCfg:
     overspeed_penalty_scale: float = -0.20
     yaw_alignment_reward_scale: float = 1.0
     yaw_error_penalty_scale: float = -0.2
-    outside_map_penalty_scale: float = -2.0
-    outside_map_grace: float = 0.0
 
     observation_space: int = 0
     action_space: int = 4
@@ -277,7 +274,6 @@ class QuadcopterObstaclesEnv(gym.Env):
                 "overspeed",
                 "yaw_alignment",
                 "yaw_error",
-                "outside_map",
                 "vel_tracking_error",
             ]
         }
@@ -449,16 +445,12 @@ class QuadcopterObstaclesEnv(gym.Env):
         )
         return side_indices
 
-    def _sample_opposite_edge_positions(
-        self,
-        source_side_indices: torch.Tensor,
-        lateral_range: float,
-        min_height: float,
-        max_height: float,
-    ) -> torch.Tensor:
+    def _sample_opposite_edge_positions(self, source_side_indices: torch.Tensor, min_height: float, max_height: float) -> torch.Tensor:
         num_samples = len(source_side_indices)
         opposite_side_indices = torch.where(source_side_indices % 2 == 0, source_side_indices + 1, source_side_indices - 1)
-        lateral = torch.empty(num_samples, device=self.device).uniform_(-lateral_range, lateral_range)
+        lateral = torch.empty(num_samples, device=self.device).uniform_(
+            -self.cfg.spawn_edge_distance, self.cfg.spawn_edge_distance
+        )
         heights = torch.empty(num_samples, device=self.device).uniform_(min_height, max_height)
 
         positions = torch.zeros((num_samples, 3), device=self.device)
@@ -482,7 +474,6 @@ class QuadcopterObstaclesEnv(gym.Env):
     def _sample_opposite_edge_positions_with_clearance(
         self,
         source_side_indices: torch.Tensor,
-        lateral_range: float,
         min_height: float,
         max_height: float,
         min_separation: float = 0.0,
@@ -497,7 +488,7 @@ class QuadcopterObstaclesEnv(gym.Env):
             best_score = None
             side_idx = source_side_indices[idx : idx + 1]
             for _ in range(128):
-                candidate = self._sample_opposite_edge_positions(side_idx, lateral_range, min_height, max_height)[0]
+                candidate = self._sample_opposite_edge_positions(side_idx, min_height, max_height)[0]
                 valid = True
                 score = torch.tensor(float("inf"), device=self.device)
 
@@ -987,24 +978,15 @@ class QuadcopterObstaclesEnv(gym.Env):
             min_separation=self.cfg.drone_spawn_min_separation,
             avoid_positions_xy=avoid_positions_xy,
         )
-        if self.cfg.target_opposite_edge:
-            source_side_indices = self._infer_edge_side_indices(start_pos)
-            target_pos = self._sample_opposite_edge_positions_with_clearance(
-                source_side_indices,
-                self.cfg.target_spawn_range,
-                self.cfg.target_min_height,
-                self.cfg.target_max_height,
-                min_separation=self.cfg.drone_spawn_min_separation,
-                avoid_obstacles=True,
-            )
-        else:
-            target_pos = self._sample_edge_positions_with_clearance(
-                len(env_ids),
-                self.cfg.target_spawn_range,
-                self.cfg.target_min_height,
-                self.cfg.target_max_height,
-                min_separation=self.cfg.drone_spawn_min_separation,
-            )
+        # Match NavRL: the target is sampled independently from the same four map edges,
+        # instead of being forced onto the edge opposite the drone spawn.
+        target_pos = self._sample_edge_positions_with_clearance(
+            len(env_ids),
+            self.cfg.target_spawn_range,
+            self.cfg.target_min_height,
+            self.cfg.target_max_height,
+            min_separation=self.cfg.drone_spawn_min_separation,
+        )
 
         root_state = self.robot.data.default_root_state.clone()
         diff = target_pos - start_pos
@@ -1163,11 +1145,6 @@ class QuadcopterObstaclesEnv(gym.Env):
         velocity_accel = torch.sum(torch.square(velocity_cmd_frame - prev_velocity_cmd_frame), dim=1)
         speed_xy = torch.linalg.norm(self.robot.data.root_lin_vel_w[:, :2], dim=1)
         overspeed = torch.square((speed_xy - self.cfg.cmd_body_vel_xy_max).clamp_min(0.0))
-        outside_map_excess = (
-            torch.abs(self.robot.data.root_pos_w[:, :2]).max(dim=1).values
-            - self.cfg.map_half_extent
-            - self.cfg.outside_map_grace
-        ).clamp_min(0.0)
         ang_vel = torch.sum(torch.square(root_ang_vel_b), dim=1)
         distance_reward = 1.0 - torch.tanh(distance_to_target / 2.0)
         target_velocity = torch.sum(self.robot.data.root_lin_vel_w * target_direction, dim=1).clamp(-1.0, 2.0)
@@ -1216,7 +1193,6 @@ class QuadcopterObstaclesEnv(gym.Env):
             "overspeed": overspeed * self.cfg.overspeed_penalty_scale * self.step_dt,
             "yaw_alignment": yaw_alignment * self.cfg.yaw_alignment_reward_scale * self.step_dt,
             "yaw_error": yaw_error_norm * self.cfg.yaw_error_penalty_scale * self.step_dt,
-            "outside_map": outside_map_excess * self.cfg.outside_map_penalty_scale * self.step_dt,
         }
         reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
         for key, value in rewards.items():
@@ -1246,7 +1222,6 @@ class QuadcopterObstaclesEnv(gym.Env):
             "distance_to_target": distance_to_target.clone(),
             "yaw_error_deg": yaw_error_deg.clone(),
             "cmd_yaw_deg": self._cmd_yaw_deg.clone(),
-            "outside_map_excess": outside_map_excess.clone(),
         }
 
         done_ids = torch.nonzero(self._done_buf, as_tuple=False).squeeze(-1)
@@ -1283,8 +1258,6 @@ class QuadcopterObstaclesEnv(gym.Env):
             log["Metrics/wall_collision_rate"] = wall_collision[done_ids].float().mean().item()
             log["Metrics/success_rate_all_envs"] = self._target_reached.float().mean().item()
             log["Metrics/avg_closest_hazard_distance"] = closest_hazard_distance.mean().item()
-            log["Metrics/outside_map_rate"] = (outside_map_excess[done_ids] > 0.0).float().mean().item()
-            log["Metrics/avg_outside_map_excess"] = outside_map_excess[done_ids].mean().item()
             extras["log"] = log
 
         rew = self._rew_buf.clone()

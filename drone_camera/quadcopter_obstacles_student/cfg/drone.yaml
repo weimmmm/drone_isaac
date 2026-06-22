@@ -8,7 +8,6 @@ flight_min_height: 0.1
 flight_max_height: 4.0
 target_reach_threshold: 0.5
 drone_spawn_min_separation: 1.0
-target_opposite_edge: true
 
 cmd_body_vel_xy_max: 2.0
 cmd_vel_z_max: 1.0

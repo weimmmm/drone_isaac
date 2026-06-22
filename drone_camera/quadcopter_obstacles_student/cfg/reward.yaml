@@ -16,5 +16,3 @@ velocity_accel_penalty_scale: -0.8
 overspeed_penalty_scale: -0.20
 yaw_alignment_reward_scale: 1.0
 yaw_error_penalty_scale: -0.2
-outside_map_penalty_scale: -2.0
-outside_map_grace: 0.0
